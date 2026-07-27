@@ -1,104 +1,630 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Dict, Any
+"""
+AskDeepakAI MLOps Service
+--------------------------
+Real, honest model training. Every number returned by this service comes from
+an actually-fitted scikit-learn / XGBoost estimator evaluated on a held-out
+test split — nothing here is narrated or guessed by an LLM.
+"""
+import uuid
+import time
+from typing import List, Dict, Any, Optional, Literal
+
 import numpy as np
+import pandas as pd
 import scipy.stats as stats
 import joblib
-import pandas as pd
-from sklearn.model_selection import train_test_split
+
+import os
+
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
+from sklearn.model_selection import train_test_split, cross_val_score, KFold, StratifiedKFold
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import accuracy_score, mean_squared_error
+from sklearn.neural_network import MLPClassifier, MLPRegressor
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix,
+    roc_auc_score, r2_score, mean_squared_error, mean_absolute_error
+)
+
+try:
+    from xgboost import XGBClassifier, XGBRegressor
+    HAS_XGBOOST = True
+except ImportError:  # pragma: no cover - environment-dependent
+    HAS_XGBOOST = False
+
+
+class LabelEncodedClassifier(BaseEstimator, ClassifierMixin):
+    """Drop-in classifier wrapper for estimators (like XGBoost) that require
+    integer-encoded targets and reject raw labels such as 'Yes'/'No'. Encoding
+    and decoding happen transparently, so this behaves like any other fitted
+    sklearn classifier to the rest of the pipeline: .classes_ is exposed in the
+    *original* label space, .predict() returns original labels, and
+    .predict_proba() columns line up with .classes_ order.
+
+    Inherits BaseEstimator/ClassifierMixin (rather than being a plain class) so
+    it remains a well-behaved estimator under sklearn's clone()/tag machinery,
+    which Pipeline and cross_val_score both rely on."""
+
+    def __init__(self, base_estimator=None):
+        self.base_estimator = base_estimator
+
+    def fit(self, X, y):
+        self._encoder = LabelEncoder()
+        y_encoded = self._encoder.fit_transform(y)
+        self.base_estimator.fit(X, y_encoded)
+        self.classes_ = self._encoder.classes_
+        return self
+
+    def predict(self, X):
+        encoded_pred = self.base_estimator.predict(X)
+        return self._encoder.inverse_transform(encoded_pred.astype(int))
+
+    def predict_proba(self, X):
+        return self.base_estimator.predict_proba(X)
+
+    @property
+    def feature_importances_(self):
+        return self.base_estimator.feature_importances_
 
 app = FastAPI(title="AskDeepakAI MLOps Service")
+
+MAX_STORED_MODELS = 25
+model_store: Dict[str, Dict[str, Any]] = {}
+model_order: List[str] = []
+
+VALID_MODEL_KEYS = ["linear", "random_forest", "xgboost", "mlp"]
+DEFAULT_MODELS = ["linear", "random_forest", "xgboost"]
+
+
+# --------------------------------------------------------------------------
+# Request/response schemas
+# --------------------------------------------------------------------------
 
 class TrainRequest(BaseModel):
     data: List[Dict[str, Any]]
     target: str
+    features: Optional[List[str]] = None
+    task_type: Optional[Literal["classification", "regression"]] = None
+    models: Optional[List[str]] = None
+    test_size: float = Field(default=0.2, gt=0.0, lt=0.9)
+    cv_folds: int = Field(default=5, ge=2, le=10)
+    random_state: int = 42
+    hyperparameters: Optional[Dict[str, Any]] = None
+
 
 class PredictRequest(BaseModel):
+    model_id: str
     features: List[Dict[str, Any]]
+
 
 class DriftRequest(BaseModel):
     reference_data: List[Dict[str, Any]]
     current_data: List[Dict[str, Any]]
 
-# Global model store for demo purposes
-model_store = {}
 
-@app.post("/api/train")
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+def build_preprocessor(X: pd.DataFrame, scale_numeric: bool) -> ColumnTransformer:
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = [c for c in X.columns if c not in numeric_cols]
+
+    numeric_steps = [("imputer", SimpleImputer(strategy="median"))]
+    if scale_numeric:
+        numeric_steps.append(("scaler", StandardScaler()))
+    numeric_pipeline = Pipeline(numeric_steps)
+
+    categorical_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+    ])
+
+    transformers = []
+    if numeric_cols:
+        transformers.append(("num", numeric_pipeline, numeric_cols))
+    if categorical_cols:
+        transformers.append(("cat", categorical_pipeline, categorical_cols))
+
+    return ColumnTransformer(transformers=transformers, remainder="drop")
+
+
+def make_estimator(model_key: str, task: str, hyperparameters: Dict[str, Any]):
+    n_estimators = int(hyperparameters.get("n_estimators", 100))
+    max_depth = hyperparameters.get("max_depth")
+    max_depth = int(max_depth) if max_depth not in (None, "") else None
+    learning_rate = float(hyperparameters.get("learning_rate", 0.1))
+    epochs = int(hyperparameters.get("epochs", 200))
+    random_state = int(hyperparameters.get("random_state", 42))
+
+    if model_key == "linear":
+        return (LogisticRegression(max_iter=1000, random_state=random_state)
+                if task == "classification"
+                else LinearRegression())
+
+    if model_key == "random_forest":
+        cls = RandomForestClassifier if task == "classification" else RandomForestRegressor
+        # oob_score=True gives a real, free out-of-bag performance estimate
+        # (each tree is evaluated only on the rows it didn't see during bagging)
+        # without costing an extra train/test split.
+        return cls(n_estimators=n_estimators, max_depth=max_depth, random_state=random_state, oob_score=True)
+
+    if model_key == "xgboost":
+        if not HAS_XGBOOST:
+            # Honest fallback: tell the caller, don't silently substitute without saying so.
+            raise ValueError("xgboost is not installed on this service")
+        if task == "classification":
+            # XGBoost requires integer-encoded targets (0..n-1) and rejects raw
+            # string labels like "Yes"/"No" — wrap it so it accepts the same
+            # label space as every other classifier in this service.
+            return LabelEncodedClassifier(XGBClassifier(
+                n_estimators=n_estimators, max_depth=max_depth or 6,
+                learning_rate=learning_rate, random_state=random_state,
+                eval_metric="logloss"
+            ))
+        return XGBRegressor(
+            n_estimators=n_estimators, max_depth=max_depth or 6,
+            learning_rate=learning_rate, random_state=random_state
+        )
+
+    if model_key == "mlp":
+        hidden = (64, 32)
+        cls = MLPClassifier if task == "classification" else MLPRegressor
+        # early_stopping=True holds out 10% of training data as a real internal
+        # validation set, giving genuine validation_scores_ per epoch (not just
+        # a training loss curve) and stopping before max_iter if it plateaus.
+        return cls(hidden_layer_sizes=hidden, max_iter=epochs, random_state=random_state, early_stopping=True, n_iter_no_change=10)
+
+    raise ValueError(f"Unknown model key: {model_key}")
+
+
+def display_name(model_key: str, task: str) -> str:
+    names = {
+        "linear": "Logistic Regression" if task == "classification" else "Linear Regression",
+        "random_forest": "Random Forest " + ("Classifier" if task == "classification" else "Regressor"),
+        "xgboost": "XGBoost " + ("Classifier" if task == "classification" else "Regressor"),
+        "mlp": "Multi-Layer Perceptron (Neural Network)",
+    }
+    return names.get(model_key, model_key)
+
+
+def get_transformed_feature_names(preprocessor: ColumnTransformer) -> List[str]:
+    try:
+        return list(preprocessor.get_feature_names_out())
+    except Exception:
+        return []
+
+
+def aggregate_importance_to_original(raw_names: List[str], raw_scores: List[float]) -> List[Dict[str, Any]]:
+    """One-hot encoding explodes a single original column into many transformed
+    columns (e.g. num__Age, cat__Country_US, cat__Country_UK). Sum the
+    contributions back onto the original column name so the UI shows a
+    feature importance chart users can actually map back to their data."""
+    agg: Dict[str, float] = {}
+    for name, score in zip(raw_names, raw_scores):
+        # strip the ColumnTransformer prefix ("num__" / "cat__")
+        stripped = name.split("__", 1)[-1] if "__" in name else name
+        # strip the one-hot encoded category suffix, e.g. "Country_US" -> "Country"
+        original = stripped
+        if "_" in stripped:
+            # only strip if this looks like a OHE expansion (best-effort heuristic)
+            candidate = stripped.rsplit("_", 1)[0]
+            original = candidate if candidate else stripped
+        agg[original] = agg.get(original, 0.0) + abs(float(score))
+
+    total = sum(agg.values()) or 1.0
+    result = [{"feature": k, "score": round(v / total, 4)} for k, v in agg.items()]
+    result.sort(key=lambda r: r["score"], reverse=True)
+    return result
+
+
+def extract_feature_importance(estimator, preprocessor: ColumnTransformer) -> List[Dict[str, Any]]:
+    names = get_transformed_feature_names(preprocessor)
+    if hasattr(estimator, "feature_importances_"):
+        scores = list(estimator.feature_importances_)
+    elif hasattr(estimator, "coef_"):
+        coef = np.asarray(estimator.coef_)
+        scores = list(np.abs(coef).ravel()) if coef.ndim > 1 else list(np.abs(coef))
+    else:
+        return []
+    if not names or len(names) != len(scores):
+        return [{"feature": f"feature_{i}", "score": round(float(s), 4)} for i, s in enumerate(scores)]
+    return aggregate_importance_to_original(names, scores)
+
+
+def extract_rf_tree_splits(estimator, preprocessor: ColumnTransformer, max_trees: int = 6) -> List[Dict[str, Any]]:
+    """Pull genuine root-split data out of real fitted DecisionTree estimators
+    inside a RandomForest. Nothing here is invented — it's read directly off
+    sklearn's tree_.feature / tree_.threshold / tree_.impurity arrays."""
+    if not hasattr(estimator, "estimators_"):
+        return []
+    names = get_transformed_feature_names(preprocessor)
+    trees = estimator.estimators_[:max_trees]
+    out = []
+    for idx, tree_model in enumerate(trees):
+        t = tree_model.tree_
+        feat_idx = int(t.feature[0])
+        raw_name = names[feat_idx] if names and 0 <= feat_idx < len(names) else f"feature_{feat_idx}"
+        feat_name = raw_name.split("__", 1)[-1] if "__" in raw_name else raw_name
+        out.append({
+            "id": idx + 1,
+            "name": f"Estimator Tree #{idx + 1}",
+            "splitFeature": feat_name,
+            "splitValue": round(float(t.threshold[0]), 4),
+            "sampleCount": int(t.n_node_samples[0]),
+            "impurity": round(float(t.impurity[0]), 4),
+            "treeDepth": int(t.max_depth),
+            "leafCount": int(t.n_leaves),
+        })
+    return out
+
+
+def choose_positive_label(y_train, classes_: List[Any]):
+    """For binary targets with arbitrary label values (e.g. 'Yes'/'No',
+    'Active'/'Churned'), there's no universal 'positive' class. We deterministically
+    treat the minority class in the training data as positive — the standard
+    convention for problems like churn, fraud, or default prediction, where the
+    class of interest is the rarer one."""
+    counts = pd.Series(y_train).value_counts()
+    pos_label = counts.idxmin()
+    neg_label = [c for c in classes_ if c != pos_label][0]
+    pos_idx = list(classes_).index(pos_label)
+    return pos_label, neg_label, pos_idx
+
+
+def compute_classification_metrics(y_test, y_pred, y_proba, is_binary: bool, pos_label=None, pos_idx=None) -> Dict[str, Any]:
+    if is_binary:
+        metrics: Dict[str, Any] = {
+            "accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
+            "precision": round(float(precision_score(y_test, y_pred, pos_label=pos_label, average="binary", zero_division=0)), 4),
+            "recall": round(float(recall_score(y_test, y_pred, pos_label=pos_label, average="binary", zero_division=0)), 4),
+            "f1Score": round(float(f1_score(y_test, y_pred, pos_label=pos_label, average="binary", zero_division=0)), 4),
+        }
+        if y_proba is not None and pos_idx is not None:
+            try:
+                metrics["rocAuc"] = round(float(roc_auc_score(y_test, y_proba[:, pos_idx], pos_label=pos_label)), 4)
+            except Exception:
+                pass
+        return metrics
+
+    return {
+        "accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
+        "precision": round(float(precision_score(y_test, y_pred, average="weighted", zero_division=0)), 4),
+        "recall": round(float(recall_score(y_test, y_pred, average="weighted", zero_division=0)), 4),
+        "f1Score": round(float(f1_score(y_test, y_pred, average="weighted", zero_division=0)), 4),
+    }
+
+
+def compute_confusion_matrix(y_test, y_pred, is_binary: bool, pos_label=None, neg_label=None):
+    if is_binary and pos_label is not None:
+        labels = [neg_label, pos_label]
+        cm = confusion_matrix(y_test, y_pred, labels=labels)
+        tn, fp, fn, tp = cm.ravel()
+        return {"tp": int(tp), "tn": int(tn), "fp": int(fp), "fn": int(fn), "positiveLabel": str(pos_label)}
+
+    labels = sorted(pd.unique(pd.Series(list(y_test) + list(y_pred))), key=str)
+    cm = confusion_matrix(y_test, y_pred, labels=labels)
+    return {"matrix": cm.tolist(), "labels": [str(l) for l in labels]}
+
+
+def compute_regression_metrics(y_test, y_pred) -> Dict[str, Any]:
+    mse = mean_squared_error(y_test, y_pred)
+    return {
+        "r2Score": round(float(r2_score(y_test, y_pred)), 4),
+        "mse": round(float(mse), 4),
+        "rmse": round(float(np.sqrt(mse)), 4),
+        "mae": round(float(mean_absolute_error(y_test, y_pred)), 4),
+    }
+
+
+def to_native(value):
+    """Convert numpy scalars (int64, float64, bool_, str_...) to plain Python
+    types so FastAPI's JSON encoder doesn't choke on them, and NaN -> None."""
+    if isinstance(value, (np.generic,)):
+        value = value.item()
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    return value
+
+
+def store_model(pipeline: Pipeline, meta: Dict[str, Any]) -> str:
+    model_id = str(uuid.uuid4())
+    model_store[model_id] = {"pipeline": pipeline, "meta": meta}
+    model_order.append(model_id)
+    if len(model_order) > MAX_STORED_MODELS:
+        oldest = model_order.pop(0)
+        model_store.pop(oldest, None)
+    return model_id
+
+
+# --------------------------------------------------------------------------
+# Endpoints
+# --------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "xgboost_available": HAS_XGBOOST}
+
+
+@app.post("/train")
 def train_model(request: TrainRequest):
     if not request.data:
-        raise HTTPException(status_code=400, detail="No data provided")
-    
+        raise HTTPException(status_code=400, detail="No training data provided.")
+    if len(request.data) < 20:
+        raise HTTPException(status_code=400, detail=f"Need at least 20 rows to train reliably; received {len(request.data)}.")
+
     df = pd.DataFrame(request.data)
     if request.target not in df.columns:
-        raise HTTPException(status_code=400, detail="Target variable not found in data")
-        
-    y = df[request.target]
-    X = df.drop(columns=[request.target])
-    
-    # Simple auto-detect categorical encoding
-    X = pd.get_dummies(X)
-    
+        raise HTTPException(status_code=400, detail=f"Target column '{request.target}' not found in the dataset.")
+
+    feature_cols = request.features or [c for c in df.columns if c != request.target]
+    feature_cols = [c for c in feature_cols if c in df.columns and c != request.target]
+    if not feature_cols:
+        raise HTTPException(status_code=400, detail="No valid feature columns provided.")
+
+    y_raw = df[request.target]
+    X = df[feature_cols].copy()
+
+    # Drop rows where the target is missing — can't train or evaluate on unknown labels.
+    valid_mask = y_raw.notna()
+    X = X[valid_mask]
+    y_raw = y_raw[valid_mask]
+    if len(X) < 20:
+        raise HTTPException(status_code=400, detail="Fewer than 20 rows remain after dropping missing target values.")
+
     # Determine task type
-    if pd.api.types.is_numeric_dtype(y) and y.nunique() > 10:
-        task = "regression"
-        model = RandomForestRegressor(n_estimators=100)
+    numeric_target = pd.api.types.is_numeric_dtype(y_raw)
+    distinct = y_raw.nunique()
+    if request.task_type:
+        task = request.task_type
     else:
-        task = "classification"
-        model = RandomForestClassifier(n_estimators=100)
-        
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    model.fit(X_train, y_train)
-    
-    # Save model
-    joblib.dump(model, "model_artifact.joblib")
-    
-    # Dummy accuracy parsing
-    if task == "classification":
-        score = accuracy_score(y_test, model.predict(X_test))
-        metric = "Accuracy"
-    else:
-        score = mean_squared_error(y_test, model.predict(X_test))
-        metric = "MSE"
-        
-    return {"status": "Model trained successfully", "task": task, metric: score}
+        task = "regression" if (numeric_target and distinct > 15) else "classification"
 
+    if task == "classification" and distinct < 2:
+        raise HTTPException(status_code=400, detail="Target column has fewer than 2 distinct classes; cannot classify.")
 
-@app.post("/api/predict")
-def predict_model(request: PredictRequest):
+    y = y_raw
+    is_binary = task == "classification" and distinct == 2
+
+    requested_models = [m for m in (request.models or DEFAULT_MODELS) if m in VALID_MODEL_KEYS]
+    if not requested_models:
+        requested_models = DEFAULT_MODELS
+
+    # Single split shared across all requested models for a fair, apples-to-apples comparison.
+    stratify = y if (task == "classification" and y.value_counts().min() >= 2) else None
     try:
-        model = joblib.load("model_artifact.joblib")
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Model not found. Train first.")
-        
-    df = pd.DataFrame(request.features)
-    df = pd.get_dummies(df)
-    
-    predictions = model.predict(df)
-    return {"predictions": predictions.tolist()}
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=request.test_size, random_state=request.random_state, stratify=stratify
+        )
+    except ValueError:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=request.test_size, random_state=request.random_state
+        )
 
-@app.post("/api/drift-metrics")
+    hyperparameters = request.hyperparameters or {}
+    scoring = "accuracy" if task == "classification" else "r2"
+    cv_folds = min(request.cv_folds, y_train.value_counts().min()) if task == "classification" else request.cv_folds
+    cv_folds = max(cv_folds, 2)
+
+    results = []
+    errors = []
+
+    for model_key in requested_models:
+        try:
+            preprocessor = build_preprocessor(X_train, scale_numeric=(model_key in ("linear", "mlp")))
+            estimator = make_estimator(model_key, task, hyperparameters)
+            pipeline = Pipeline([("preprocess", preprocessor), ("model", estimator)])
+
+            start = time.time()
+            pipeline.fit(X_train, y_train)
+            elapsed_ms = int((time.time() - start) * 1000)
+
+            y_pred = pipeline.predict(X_test)
+
+            # Cross-validation on the training fold only (never touches the held-out test set).
+            try:
+                cv_splitter = (StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=request.random_state)
+                               if task == "classification"
+                               else KFold(n_splits=cv_folds, shuffle=True, random_state=request.random_state))
+                cv_scores = cross_val_score(pipeline, X_train, y_train, cv=cv_splitter, scoring=scoring)
+                cv_result = {
+                    "scores": [round(float(s), 4) for s in cv_scores],
+                    "mean": round(float(np.mean(cv_scores)), 4),
+                    "std": round(float(np.std(cv_scores)), 4),
+                    "folds": cv_folds,
+                    "metric": scoring,
+                }
+            except Exception as cv_err:
+                cv_result = {"error": str(cv_err)}
+
+            fitted_preprocessor = pipeline.named_steps["preprocess"]
+            fitted_estimator = pipeline.named_steps["model"]
+
+            if task == "classification":
+                y_proba = pipeline.predict_proba(X_test) if hasattr(fitted_estimator, "predict_proba") else None
+                pos_label = neg_label = pos_idx = None
+                if is_binary and hasattr(fitted_estimator, "classes_"):
+                    pos_label, neg_label, pos_idx = choose_positive_label(y_train, fitted_estimator.classes_)
+                metrics = compute_classification_metrics(y_test, y_pred, y_proba, is_binary, pos_label, pos_idx)
+                confusion = compute_confusion_matrix(y_test, y_pred, is_binary, pos_label, neg_label)
+                primary_metric_name = "accuracy"
+                primary_metric_value = metrics["accuracy"]
+            else:
+                metrics = compute_regression_metrics(y_test, y_pred)
+                confusion = None
+                primary_metric_name = "r2Score"
+                primary_metric_value = metrics["r2Score"]
+
+            feature_importance = extract_feature_importance(fitted_estimator, fitted_preprocessor)
+
+            estimators_detail = (
+                extract_rf_tree_splits(fitted_estimator, fitted_preprocessor)
+                if model_key == "random_forest" else []
+            )
+
+            oob_score = None
+            if model_key == "random_forest" and hasattr(fitted_estimator, "oob_score_"):
+                try:
+                    oob_score = round(float(fitted_estimator.oob_score_), 4)
+                except Exception:
+                    oob_score = None
+
+            deep_learning = None
+            if model_key == "mlp" and hasattr(fitted_estimator, "loss_curve_"):
+                validation_scores = getattr(fitted_estimator, "validation_scores_", None)
+                deep_learning = {
+                    "trainingLogs": [
+                        {"epoch": i + 1, "trainingLoss": round(float(loss), 5)}
+                        for i, loss in enumerate(fitted_estimator.loss_curve_)
+                    ],
+                    "validationScores": (
+                        [round(float(v), 5) for v in validation_scores]
+                        if validation_scores is not None else None
+                    ),
+                    "validationMetric": "accuracy" if task == "classification" else "r2",
+                    "finalValidationScore": (
+                        round(float(validation_scores[-1]), 5)
+                        if validation_scores is not None and len(validation_scores) > 0 else None
+                    ),
+                    "hiddenLayerSizes": list(fitted_estimator.hidden_layer_sizes),
+                    "nLayers": int(fitted_estimator.n_layers_),
+                    "nIterations": int(fitted_estimator.n_iter_),
+                    "totalTrainableParams": sum(
+                        w.size for w in fitted_estimator.coefs_
+                    ) + sum(b.size for b in fitted_estimator.intercepts_),
+                }
+
+            # Real actual-vs-predicted rows for the frontend prediction table.
+            # y_pred is positionally aligned with X_test (same row order), so we
+            # index both by position `i`, not by the original dataframe index.
+            sample_n = min(50, len(X_test))
+            predictions = []
+            for i in range(sample_n):
+                row_idx = X_test.index[i]
+                confidence = None
+                if task == "classification" and y_proba is not None:
+                    confidence = round(float(np.max(y_proba[i])) * 100, 1)
+                predictions.append({
+                    "id": i + 1,
+                    "actual": to_native(y_test.iloc[i]),
+                    "predicted": to_native(y_pred[i]),
+                    "confidence": confidence,
+                    "features": {c: to_native(X_test.loc[row_idx, c]) for c in feature_cols[:5]},
+                })
+
+            model_id = store_model(pipeline, {
+                "task": task, "target": request.target, "features": feature_cols, "modelKey": model_key,
+            })
+
+            results.append({
+                "modelKey": model_key,
+                "modelName": display_name(model_key, task),
+                "modelId": model_id,
+                "metrics": metrics,
+                "confusionMatrix": confusion,
+                "featureImportance": feature_importance,
+                "cv": cv_result,
+                "estimators": estimators_detail,
+                "oobScore": oob_score,
+                "deepLearning": deep_learning,
+                "predictions": predictions,
+                "executionTimeMs": elapsed_ms,
+                "primaryMetric": primary_metric_name,
+                "primaryMetricValue": primary_metric_value,
+                "trainRows": int(len(X_train)),
+                "testRows": int(len(X_test)),
+            })
+        except Exception as model_err:
+            errors.append({"modelKey": model_key, "error": str(model_err)})
+
+    if not results:
+        raise HTTPException(status_code=500, detail=f"All requested models failed to train: {errors}")
+
+    # Rank by primary metric (higher is better for accuracy and r2)
+    results.sort(key=lambda r: r["primaryMetricValue"], reverse=True)
+    champion = results[0]
+
+    return {
+        "status": "success",
+        "task": task,
+        "isBinary": is_binary,
+        "target": request.target,
+        "features": feature_cols,
+        "champion": champion,
+        "comparison": [
+            {
+                "modelKey": r["modelKey"],
+                "modelName": r["modelName"],
+                "primaryMetric": r["primaryMetric"],
+                "metricValue": r["primaryMetricValue"],
+                "executionTimeMs": r["executionTimeMs"],
+            } for r in results
+        ],
+        "results": results,
+        "errors": errors,
+        "trainRatio": round(1 - request.test_size, 2),
+    }
+
+
+@app.post("/predict")
+def predict_model(request: PredictRequest):
+    stored = model_store.get(request.model_id)
+    if not stored:
+        raise HTTPException(status_code=404, detail="Model not found. It may have expired — train again.")
+
+    df = pd.DataFrame(request.features)
+    pipeline: Pipeline = stored["pipeline"]
+    try:
+        predictions = pipeline.predict(df)
+    except Exception as err:
+        raise HTTPException(status_code=400, detail=f"Prediction failed: {err}")
+
+    return {"predictions": predictions.tolist(), "meta": stored["meta"]}
+
+
+@app.get("/download/{model_id}")
+def download_model(model_id: str, background_tasks: BackgroundTasks):
+    stored = model_store.get(model_id)
+    if not stored:
+        raise HTTPException(status_code=404, detail="Model not found. It may have expired — train again.")
+
+    filename = f"/tmp/{model_id}.joblib"
+    joblib.dump(stored["pipeline"], filename)
+    background_tasks.add_task(lambda: os.path.exists(filename) and os.remove(filename))
+    download_name = f"{stored['meta'].get('target', 'model')}_{stored['meta'].get('modelKey', 'model')}.joblib"
+    return FileResponse(filename, filename=download_name, media_type="application/octet-stream")
+
+
+@app.post("/drift-metrics")
 def drift_metrics(request: DriftRequest):
-    """
-    Computes data drift using the Kolmogorov-Smirnov test mapping per feature.
-    """
+    """Computes real data drift using the Kolmogorov-Smirnov two-sample test,
+    per numeric feature, between a reference slice and a current slice."""
     if not request.current_data or not request.reference_data:
-         raise HTTPException(status_code=400, detail="Data payload missing")
-         
+        raise HTTPException(status_code=400, detail="Both reference_data and current_data are required.")
+
     df_ref = pd.DataFrame(request.reference_data)
     df_cur = pd.DataFrame(request.current_data)
-    
+
     drift_report = {}
-    
     for col in df_cur.columns:
         if col in df_ref.columns and pd.api.types.is_numeric_dtype(df_ref[col]):
-            stat, p_value = stats.ks_2samp(df_ref[col].dropna(), df_cur[col].dropna())
+            ref_vals = df_ref[col].dropna()
+            cur_vals = df_cur[col].dropna()
+            if len(ref_vals) < 2 or len(cur_vals) < 2:
+                continue
+            stat, p_value = stats.ks_2samp(ref_vals, cur_vals)
             drift_report[col] = {
-                 "ks_stat": stat,
-                 "p_value": p_value,
-                 "drift_detected": bool(p_value < 0.05)
+                "ks_stat": round(float(stat), 4),
+                "p_value": round(float(p_value), 4),
+                "drift_detected": bool(p_value < 0.05),
             }
-            
+
     return {"drift_status": drift_report}

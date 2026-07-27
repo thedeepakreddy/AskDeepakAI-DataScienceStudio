@@ -1863,7 +1863,7 @@ if __name__ == "__main__":
                       Classifier ROC Curve
                     </h4>
                     <span className="text-[9px] font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
-                      AUC: {mlResult?.metrics?.accuracy ? (mlResult.metrics.accuracy * 1.05 > 0.99 ? '0.98' : (mlResult.metrics.accuracy * 1.05).toFixed(2)) : '0.91'}
+                      AUC: {mlResult?.metrics?.rocAuc !== undefined && mlResult?.metrics?.rocAuc !== null ? mlResult.metrics.rocAuc.toFixed(2) : 'N/A'}
                     </span>
                   </div>
                   

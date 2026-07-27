@@ -201,6 +201,11 @@ export default function App() {
   };
 
   // 2. RUN MACHINE LEARNING PIPELINE
+  // Sends the FULL active dataset so the Python service trains on real, complete
+  // data (not a 30-row sample). If the ML compute service is unreachable or
+  // errors, this surfaces a clear error instead of silently substituting
+  // client-fabricated metrics — a real trained model or an honest failure,
+  // never a guess dressed up as a result.
   const triggerPrediction = async (
     targetCol: string,
     features: string[],
@@ -211,10 +216,6 @@ export default function App() {
     setLoadingML(true);
     setErrorLine(null);
     try {
-      // Package payload with headers stats and a 30-row raw sample to let Gemini analyze distribution correlations
-      const datasetColumns = activeDataset.columns.map(c => ({ name: c.name, type: c.type }));
-      const datasetRowsSample = activeDataset.rows.slice(0, 30);
-
       const res = await fetch('/api/run-ml-prediction', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -223,28 +224,28 @@ export default function App() {
           features,
           modelType: modelClass,
           hyperparameters,
-          datasetColumns,
-          datasetRowsSample
+          datasetRows: activeDataset.rows
         })
       });
 
       const resText = await res.text();
-      let result;
+      let parsed: any = null;
       try {
-        if (resText.trim().startsWith('<!doctype html') || resText.trim().startsWith('<html') || !res.ok) {
-          throw new Error('Fallback to local ML predictor');
-        }
-        result = resText ? JSON.parse(resText) : {};
-      } catch (parseErr) {
-        console.warn('Backend server returned invalid or HTML response. running local ML fallback...', parseErr);
-        result = getClientSideMLFallback(targetCol, features, modelClass, hyperparameters, datasetColumns, datasetRowsSample);
+        parsed = resText ? JSON.parse(resText) : null;
+      } catch {
+        parsed = null;
       }
 
-      setMlResult(result);
-      return result;
+      if (!res.ok || !parsed) {
+        const message = parsed?.error || parsed?.hint || `Training request failed (HTTP ${res.status}). Is the Node server running?`;
+        throw new Error(message);
+      }
+
+      setMlResult(parsed);
+      return parsed;
     } catch (err: any) {
       console.error(err);
-      setErrorLine('ML training execution failed: ' + (err.message || 'Check terminal server.'));
+      setErrorLine('ML training failed: ' + (err.message || 'The ML compute service may be offline.'));
       throw err;
     } finally {
       setLoadingML(false);
@@ -754,169 +755,3 @@ function getClientSideAnalysisFallback(filename: string, columns: any[], rowCoun
     };
   }
 }
-
-function getClientSideMLFallback(
-  target: string,
-  features: string[],
-  modelType: string,
-  hyperparameters: any,
-  columns: any[],
-  sampleRows: any[]
-) {
-  const isClassification = modelType === 'classification' || target.toLowerCase().includes('churn') || target.toLowerCase().includes('fail');
-  const alg = isClassification ? 'RandomForestClassifier' : 'GradientBoostingRegressor';
-  
-  const featureImportance = features.map((f, i) => ({
-    feature: f,
-    score: parseFloat((1 - i * 0.15 - Math.random() * 0.1).toFixed(4))
-  })).map(item => ({ ...item, score: item.score > 0 ? item.score : 0.05 }));
-
-  const sumScores = featureImportance.reduce((acc, x) => acc + x.score, 0);
-  featureImportance.forEach(item => { item.score = parseFloat((item.score / sumScores).toFixed(3)); });
-  featureImportance.sort((a,b)=> b.score - a.score);
-
-  const score1 = isClassification ? 0.78 : 0.72;
-  const score2 = isClassification ? 0.84 : 0.81;
-  const score3 = isClassification ? 0.89 : 0.87;
-
-  const tuningHistory = [
-    { iteration: 1, score: score1, params: "estimators=50, depth=5" },
-    { iteration: 2, score: score2, params: "estimators=100, depth=8" },
-    { iteration: 3, score: score3, params: "estimators=150, depth=12, rate=0.1" }
-  ];
-
-  const metrics = isClassification ? {
-    accuracy: 0.894,
-    precision: 0.885,
-    recall: 0.862,
-    f1Score: 0.873
-  } : {
-    r2Score: 0.868,
-    mae: 142.15,
-    rmse: 198.42
-  };
-
-  const risks = [
-    {
-      title: "Data Disparity & Missing Log Imbalance",
-      riskLevel: "High",
-      description: "Class/variable distribution is highly skewed. Standard predictors might get biassed towards majority patterns, risking higher false negatives."
-    },
-    {
-      title: "Temporal Feedback Loops",
-      riskLevel: "Medium",
-      description: "Using delayed indicators to infer real-time behaviors triggers target leakage risks. Continuous model metrics validation is strongly advised."
-    },
-    {
-      title: "Feature Correlation Leaks",
-      riskLevel: "Medium",
-      description: "Features collected closely with the Target column can cause inflated accuracy in testing but catastrophic failure rates in live environments."
-    }
-  ];
-
-  const recommendations = [
-    {
-      title: "Incentivize Long-term Contract Onboarding",
-      impact: "High",
-      details: "Design personalized promotions aimed at shifting standard Month-to-month contracts to 12-month subscriptions, as stability correlates heavily with lower risk."
-    },
-    {
-      title: "Deploy Automated Alerts on Support Surcharges",
-      impact: "High",
-      details: "Set up real-time slack/workflow triggers as soon as customer support tickets opened count climbs above 3 of any enterprise subscribers."
-    },
-    {
-      title: "Continuous Machine Learning Model Validation",
-      impact: "Medium",
-      details: "Set up rolling evaluations every 30 days to re-train weights, monitoring model decay ratios when seasonal behavioral variances peak."
-    }
-  ];
-
-  const scientistCallout = {
-    focusColumns: features.slice(0, 2),
-    justification: `These feature covariates explain over 65% of the prediction entropy. Deep analytical deep-dives are required to understand underlying sub-trends.`,
-    pathways: [
-      "Plot interaction scatter plots between primary features against target metrics.",
-      "Segment target outcomes across critical thresholds using range selections."
-    ]
-  };
-
-  const markdownReport = `### Executive Model Performance Brief: predicting ${target}
-
-The Machine Learning Pipeline has successfully executed an automated model optimization protocol using **${alg}** and completed 3 hyperparameter tuning iterations.
-
-#### Model Evaluation Summary
-- **Primary Algorithm**: ${alg}
-- **Training Splits**: 80% Train, 20% Test validation
-${isClassification ? `
-- **Test Accuracy**: 89.4%
-- **F1-Score**: 87.3%
-- **Precision / Recall**: 88.5% / 86.2%
-` : `
-- **R-Squared Score**: 0.868 (The model explains 86.8% of variance)
-- **Mean Absolute Error (MAE)**: 142.15
-- **Root Mean Squared Error (RMSE)**: 198.42
-`}
-
-#### Hyperparameters Chosen
-The optimized modeling configuration utilizes standard hyperparameter parameters determined via grid evaluation:
-\`\`\`json
-{
-  "n_estimators": 150,
-  "max_depth": 12,
-  "learning_rate": 0.1,
-  "random_state": 42
-}
-\`\`\`
-
-#### Executive Technical Insights
-1. **Critical Predictors**: The model isolated the key features which holds the highest impact on target expectations.
-2. **Robust Resilience**: Minimal error gaps between evaluation and test sets confirm high generalizations of results.`;
-
-  const predictions = sampleRows.slice(0, 30).map((row, index) => {
-    let actual: any = '';
-    let predicted: any = '';
-    let residual = 0;
-
-    if (isClassification) {
-      const origVal = row[target];
-      actual = origVal !== null && origVal !== undefined ? String(origVal) : 'No';
-      const match = Math.random() > 0.15;
-      predicted = match ? actual : (actual === 'Yes' || actual === '1' || actual === 'true' ? 'No' : 'Yes');
-    } else {
-      const baseVal = typeof row[target] === 'number' ? row[target] : (500 + index * 10);
-      actual = parseFloat(Number(baseVal).toFixed(2));
-      const errorPct = (Math.random() - 0.5) * 0.15;
-      predicted = parseFloat((actual * (1 + errorPct)).toFixed(2));
-      residual = parseFloat((actual - predicted).toFixed(2));
-    }
-
-    const featureValues: Record<string, any> = {};
-    features.slice(0, 3).forEach(f => {
-      featureValues[f] = row[f];
-    });
-
-    return {
-      id: index + 1,
-      actual,
-      predicted,
-      residual,
-      featureValues
-    };
-  });
-
-  return {
-    modelType,
-    modelAlgorithm: alg,
-    hyperparameters,
-    metrics,
-    featureImportance,
-    tuningHistory,
-    risks,
-    recommendations,
-    scientistCallout,
-    markdownReport,
-    predictions
-  };
-}
-
