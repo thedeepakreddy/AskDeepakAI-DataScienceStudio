@@ -1,0 +1,9 @@
+# Deliberately scoped rule set: real correctness (pyflakes, pycodestyle
+# errors), import hygiene, and typing modernization. Excludes opinionated
+# style/security presets (e.g. bandit-style blind-except warnings) that
+# would flag this service's intentional "degrade gracefully, never
+# fabricate a result" error handling as a problem.
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]

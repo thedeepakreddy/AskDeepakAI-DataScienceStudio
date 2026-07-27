@@ -1,4 +1,6 @@
 # 🧠 AskDeepakAI - Data Scientist Agent
+[![CI](https://github.com/thedeepakreddy/AskDeepakAI-DataScientist/actions/workflows/ci.yml/badge.svg)](https://github.com/thedeepakreddy/AskDeepakAI-DataScientist/actions/workflows/ci.yml)
+
 > Interactive, telemetry-free Data Science Workstation & Automated Machine Learning modeling engine powered by Google Gemini.
 
 ---
@@ -200,13 +202,25 @@ To test, debug, or run the application on your computer:
     *   This boots up the integrated Node-Vite development runtime port `3000`.
 
 5.  **Boot the MLOps Python Microservice**:
-    Open a second terminal window in the project dictionary:
+    Open a second terminal window in the project directory:
     ```bash
     cd mlops_service
-    pip install fastapi uvicorn pandas scikit-learn
+    pip install -r requirements.txt
     uvicorn main:app --reload --port 8000
     ```
     *   This boots up the Native Compute Engine for the 1-Click Deploy endpoints.
+
+### 🐳 Alternative: One-Command Local Dev with Docker
+
+If you have Docker installed, you can skip steps 2, 4, and 5 above and run the whole stack (frontend/orchestrator + Python ML microservice) with a single command:
+
+```bash
+GEMINI_API_KEY=your_actual_google_gemini_api_key_here docker compose up --build
+```
+
+*   The web app is served at `http://localhost:3000` and the ML microservice at `http://localhost:8000`.
+*   The two containers talk to each other over the Docker Compose network (`ML_SERVICE_URL=http://ml-service:8000`), so no manual wiring is needed.
+*   Dockerfiles live at `Dockerfile` (Node frontend/orchestrator, multi-stage build) and `mlops_service/Dockerfile` (Python ML microservice).
 
 ---
 

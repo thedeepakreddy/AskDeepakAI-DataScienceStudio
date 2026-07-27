@@ -74,7 +74,7 @@ export default function SQLAssistant({ dataset }: SQLAssistantProps) {
       // We'll replace the table name with ? 
       // Or we can populate a table:
       
-      alasql.tables.dataset.data = dataset.data;
+      alasql.tables.dataset.data = dataset.rows;
       
       // The LLM will probably write SELECT ... FROM dataset ...
       const res = alasql(sqlString);

@@ -32,9 +32,11 @@ export default function DataUploader({ onDatasetLoaded, currentDataset, onProcee
   
   const [problemInput, setProblemInput] = useState('');
   const [isGeneratingIntel, setIsGeneratingIntel] = useState(false);
+  const [intelError, setIntelError] = useState<string | null>(null);
 
   const fetchPipelineIntelligence = async (dataset: Dataset, problem: string) => {
     setIsGeneratingIntel(true);
+    setIntelError(null);
     setBusinessProblem(problem); // Store it globally immediately
     const profile = {
       filename: dataset.filename,
@@ -51,10 +53,14 @@ export default function DataUploader({ onDatasetLoaded, currentDataset, onProcee
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ datasetProfile: profile, businessProblem: problem })
       });
+      if (!response.ok) {
+        throw new Error(`Server responded with ${response.status}`);
+      }
       const data = await response.json();
       setPipelineIntelligence(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to fetch intelligence', err);
+      setIntelError(err.message || 'Could not analyze this dataset. Check that the backend server is running and try again.');
     } finally {
       setIsGeneratingIntel(false);
     }
@@ -202,6 +208,12 @@ export default function DataUploader({ onDatasetLoaded, currentDataset, onProcee
               )}
             </button>
           </div>
+          {intelError && (
+            <div className="mt-3 p-3 bg-rose-500/10 border border-rose-500/20 text-rose-300 rounded-xl text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <p>{intelError}</p>
+            </div>
+          )}
         </div>
 
         <div className="mb-6 relative z-10 border-b border-slate-800 pb-4">

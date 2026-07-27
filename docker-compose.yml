@@ -1,0 +1,23 @@
+services:
+  ml-service:
+    build: ./mlops_service
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      ML_SERVICE_URL: http://ml-service:8000
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    depends_on:
+      ml-service:
+        condition: service_healthy

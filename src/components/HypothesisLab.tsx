@@ -92,9 +92,12 @@ export default function HypothesisLab({ dataset }: HypothesisLabProps) {
        const data = await resp.json();
        if (resp.ok && data.interpretation) {
          setInterpretations(prev => ({ ...prev, [idx]: data.interpretation }));
+       } else {
+         throw new Error(data.error || `Server responded with ${resp.status}`);
        }
-     } catch (err) {
-       console.error("Interpretation failed");
+     } catch (err: any) {
+       console.error("Interpretation failed", err);
+       setInterpretations(prev => ({ ...prev, [idx]: '⚠️ AI interpretation unavailable (network or server error). The test statistic above is still valid.' }));
      } finally {
        setTestingHypothesisIdx(null);
      }
