@@ -13,5 +13,8 @@ __pycache__/
 .venv/
 *.joblib
 
+# Local IDE state
+.antigravity/
+
 # Firebase Service Account Key
 serviceAccountKey.json
