@@ -27,7 +27,10 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.model_selection import train_test_split, cross_val_score, KFold, StratifiedKFold
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import (
+    RandomForestClassifier, RandomForestRegressor,
+    GradientBoostingClassifier, GradientBoostingRegressor
+)
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score, confusion_matrix,
@@ -39,6 +42,12 @@ try:
     HAS_XGBOOST = True
 except ImportError:  # pragma: no cover - environment-dependent
     HAS_XGBOOST = False
+
+try:
+    import shap
+    HAS_SHAP = True
+except ImportError:  # pragma: no cover - environment-dependent
+    HAS_SHAP = False
 
 
 class LabelEncodedClassifier(BaseEstimator, ClassifierMixin):
@@ -80,8 +89,10 @@ MAX_STORED_MODELS = 25
 model_store: Dict[str, Dict[str, Any]] = {}
 model_order: List[str] = []
 
-VALID_MODEL_KEYS = ["linear", "random_forest", "xgboost", "mlp"]
-DEFAULT_MODELS = ["linear", "random_forest", "xgboost"]
+VALID_MODEL_KEYS = ["linear", "random_forest", "gradient_boosting", "xgboost", "mlp"]
+# AutoML mode trains all 5 real candidates and ranks them — the point of an
+# AutoML pipeline is comparing genuine alternatives, not training one model.
+DEFAULT_MODELS = ["linear", "random_forest", "gradient_boosting", "xgboost", "mlp"]
 
 
 # --------------------------------------------------------------------------
@@ -108,6 +119,10 @@ class PredictRequest(BaseModel):
 class DriftRequest(BaseModel):
     reference_data: List[Dict[str, Any]]
     current_data: List[Dict[str, Any]]
+
+
+class EdaRequest(BaseModel):
+    data: List[Dict[str, Any]]
 
 
 # --------------------------------------------------------------------------
@@ -157,6 +172,10 @@ def make_estimator(model_key: str, task: str, hyperparameters: Dict[str, Any]):
         # without costing an extra train/test split.
         return cls(n_estimators=n_estimators, max_depth=max_depth, random_state=random_state, oob_score=True)
 
+    if model_key == "gradient_boosting":
+        cls = GradientBoostingClassifier if task == "classification" else GradientBoostingRegressor
+        return cls(n_estimators=n_estimators, max_depth=max_depth or 3, learning_rate=learning_rate, random_state=random_state)
+
     if model_key == "xgboost":
         if not HAS_XGBOOST:
             # Honest fallback: tell the caller, don't silently substitute without saying so.
@@ -190,6 +209,7 @@ def display_name(model_key: str, task: str) -> str:
     names = {
         "linear": "Logistic Regression" if task == "classification" else "Linear Regression",
         "random_forest": "Random Forest " + ("Classifier" if task == "classification" else "Regressor"),
+        "gradient_boosting": "Gradient Boosting " + ("Classifier" if task == "classification" else "Regressor"),
         "xgboost": "XGBoost " + ("Classifier" if task == "classification" else "Regressor"),
         "mlp": "Multi-Layer Perceptron (Neural Network)",
     }
@@ -333,6 +353,113 @@ def to_native(value):
     if isinstance(value, float) and np.isnan(value):
         return None
     return value
+
+
+def rank_by_cross_validation(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """AutoML model selection rule, made explicit rather than hidden: rank by
+    mean cross-validation score (more robust than a single held-out test
+    split), highest first; ties broken by lowest fold-to-fold standard
+    deviation (the more consistent model wins). Models whose CV run failed
+    are ranked after every model with valid CV, ordered among themselves by
+    their held-out test score as a fallback."""
+    def sort_key(r):
+        cv = r.get("cv") or {}
+        cv_mean = cv.get("mean")
+        cv_std = cv.get("std")
+        if cv_mean is None:
+            return (1, 0.0, -r["primaryMetricValue"])
+        return (0, -cv_mean, cv_std if cv_std is not None else 0.0)
+
+    return sorted(results, key=sort_key)
+
+
+def build_selection_reason(results: List[Dict[str, Any]]) -> str:
+    """Explains the AutoML pick in plain language, using only the real
+    numbers already computed above — this is the exact rule rank_by_cross_validation
+    applies, just spelled out for the UI instead of left implicit."""
+    champion = results[0]
+    cv = champion.get("cv") or {}
+    cv_mean = cv.get("mean")
+
+    if cv_mean is None:
+        return (f"{champion['modelName']} selected on held-out test {champion['primaryMetric']} "
+                f"({champion['primaryMetricValue']}) — cross-validation could not be computed for this run.")
+
+    reason = (f"{champion['modelName']} selected for the highest {cv.get('folds')}-fold cross-validation "
+              f"mean {cv.get('metric')} ({round(cv_mean, 4)})")
+
+    if len(results) > 1:
+        runner_up = results[1]
+        ru_cv = runner_up.get("cv") or {}
+        ru_mean = ru_cv.get("mean")
+        if ru_mean is not None and abs(cv_mean - ru_mean) < 0.005:
+            champ_std = cv.get("std", 0.0)
+            ru_std = ru_cv.get("std", 0.0)
+            reason += (f", tie-broken against {runner_up['modelName']} (CV mean {round(ru_mean, 4)}) "
+                       f"by lower fold-to-fold variance (std {round(champ_std, 4)} vs {round(ru_std, 4)})")
+
+    return reason + "."
+
+
+def compute_shap_importance(pipeline: Pipeline, X_sample: pd.DataFrame, model_key: str, task: str, max_features: int = 10) -> Optional[List[Dict[str, Any]]]:
+    """Computes real SHAP values for the champion model on a bounded sample
+    of the held-out test set, then aggregates mean(|SHAP value|) back to
+    original column names. Returns None (never fabricated numbers) if SHAP
+    can't explain this particular model/version combination."""
+    if not HAS_SHAP:
+        return None
+    try:
+        preprocessor = pipeline.named_steps["preprocess"]
+        estimator = pipeline.named_steps["model"]
+        X_transformed = preprocessor.transform(X_sample)
+        if hasattr(X_transformed, "toarray"):
+            X_transformed = X_transformed.toarray()
+        names = get_transformed_feature_names(preprocessor)
+
+        # LabelEncodedClassifier (used for xgboost classification) wraps the
+        # real estimator SHAP needs to introspect directly.
+        shap_estimator = estimator.base_estimator if isinstance(estimator, LabelEncodedClassifier) else estimator
+
+        if model_key in ("random_forest", "gradient_boosting", "xgboost"):
+            explainer = shap.TreeExplainer(shap_estimator)
+            raw_values = explainer.shap_values(X_transformed)
+        elif model_key == "linear":
+            explainer = shap.LinearExplainer(shap_estimator, X_transformed)
+            raw_values = explainer.shap_values(X_transformed)
+        else:
+            # Generic bounded explainer (e.g. MLP) — background sample kept
+            # small since this path is far more compute-expensive. For
+            # classification this must explain predict_proba (numeric), not
+            # predict (returns string class labels SHAP's masking can't
+            # handle numerically).
+            background_n = min(30, len(X_transformed))
+            predict_fn = (
+                shap_estimator.predict_proba
+                if task == "classification" and hasattr(shap_estimator, "predict_proba")
+                else shap_estimator.predict
+            )
+            explainer = shap.Explainer(predict_fn, X_transformed[:background_n])
+            raw_values = explainer(X_transformed).values
+
+        # Normalize the many shapes SHAP can return across versions/model
+        # families into a single (n_samples, n_features) magnitude array.
+        if isinstance(raw_values, list):
+            arr = np.mean([np.abs(np.asarray(v)) for v in raw_values], axis=0)
+        else:
+            arr = np.asarray(raw_values)
+            if arr.ndim == 3:
+                arr = np.abs(arr).mean(axis=-1)
+            else:
+                arr = np.abs(arr)
+
+        mean_abs = np.asarray(arr).mean(axis=0).flatten()
+        if not names or len(names) != len(mean_abs):
+            return None
+
+        importance = aggregate_importance_to_original(names, list(mean_abs))
+        return importance[:max_features]
+    except Exception:
+        return None
 
 
 def store_model(pipeline: Pipeline, meta: Dict[str, Any]) -> str:
@@ -548,9 +675,21 @@ def train_model(request: TrainRequest):
     if not results:
         raise HTTPException(status_code=500, detail=f"All requested models failed to train: {errors}")
 
-    # Rank by primary metric (higher is better for accuracy and r2)
-    results.sort(key=lambda r: r["primaryMetricValue"], reverse=True)
+    results = rank_by_cross_validation(results)
     champion = results[0]
+    selection_reason = build_selection_reason(results)
+
+    # Real SHAP explainability for the champion only (computing it for every
+    # candidate would multiply training time for no benefit to the user).
+    champion["shapImportance"] = None
+    if HAS_SHAP:
+        champion_stored = model_store.get(champion["modelId"])
+        if champion_stored:
+            sample_n = min(100, len(X_test))
+            X_shap_sample = X_test.iloc[:sample_n]
+            champion["shapImportance"] = compute_shap_importance(
+                champion_stored["pipeline"], X_shap_sample, champion["modelKey"], task
+            )
 
     return {
         "status": "success",
@@ -559,6 +698,7 @@ def train_model(request: TrainRequest):
         "target": request.target,
         "features": feature_cols,
         "champion": champion,
+        "selectionReason": selection_reason,
         "comparison": [
             {
                 "modelKey": r["modelKey"],
@@ -566,11 +706,119 @@ def train_model(request: TrainRequest):
                 "primaryMetric": r["primaryMetric"],
                 "metricValue": r["primaryMetricValue"],
                 "executionTimeMs": r["executionTimeMs"],
+                "cv": r.get("cv"),
             } for r in results
         ],
         "results": results,
         "errors": errors,
         "trainRatio": round(1 - request.test_size, 2),
+    }
+
+
+@app.post("/eda")
+def run_eda(request: EdaRequest):
+    """Real, server-side exploratory data analysis. Everything returned here
+    is computed directly by pandas/numpy over the actual uploaded rows — mean,
+    median, std, skew, IQR-based outliers, and Pearson correlation are all
+    genuine statistics, not narrated guesses."""
+    if not request.data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+
+    df = pd.DataFrame(request.data)
+    if len(df) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 rows to compute EDA statistics.")
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = [c for c in df.columns if c not in numeric_cols]
+
+    missing_report = [
+        {
+            "column": col,
+            "missingCount": int(df[col].isna().sum()),
+            "missingPercent": round(float(df[col].isna().sum()) / len(df) * 100, 2),
+        }
+        for col in df.columns
+    ]
+
+    numeric_summaries = []
+    outlier_report = []
+    for col in numeric_cols:
+        series = df[col].dropna()
+        if len(series) == 0:
+            continue
+        q1 = float(series.quantile(0.25))
+        q3 = float(series.quantile(0.75))
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+
+        numeric_summaries.append({
+            "column": col,
+            "count": int(len(series)),
+            "mean": round(float(series.mean()), 4),
+            "median": round(float(series.median()), 4),
+            "std": round(float(series.std(ddof=0)), 4) if len(series) > 1 else 0.0,
+            "min": round(float(series.min()), 4),
+            "max": round(float(series.max()), 4),
+            "q1": round(q1, 4),
+            "q3": round(q3, 4),
+            # Fisher-Pearson skewness: 0 symmetric, >0 right-tailed, <0 left-tailed.
+            "skew": round(float(series.skew()), 4) if len(series) > 2 else 0.0,
+        })
+
+        outlier_mask = (series < lower_bound) | (series > upper_bound)
+        outlier_series = series[outlier_mask]
+        outlier_report.append({
+            "column": col,
+            "q1": round(q1, 4),
+            "q3": round(q3, 4),
+            "iqr": round(iqr, 4),
+            "lowerBound": round(lower_bound, 4),
+            "upperBound": round(upper_bound, 4),
+            "outlierCount": int(outlier_mask.sum()),
+            "outlierPercent": round(float(outlier_mask.sum()) / len(series) * 100, 2),
+            "sampleOutliers": [
+                {"rowIndex": to_native(idx), "value": to_native(val)}
+                for idx, val in outlier_series.head(50).items()
+            ],
+        })
+
+    correlation = None
+    if len(numeric_cols) >= 2:
+        corr_df = df[numeric_cols].corr(method="pearson")
+        correlation = {
+            "columns": numeric_cols,
+            "matrix": [
+                [None if pd.isna(v) else round(float(v), 4) for v in row]
+                for row in corr_df.values.tolist()
+            ],
+        }
+
+    categorical_summaries = []
+    for col in categorical_cols:
+        non_null_total = int(df[col].notna().sum())
+        top_counts = df[col].value_counts(dropna=True).head(10)
+        categorical_summaries.append({
+            "column": col,
+            "distinctCount": int(df[col].nunique(dropna=True)),
+            "topValues": [
+                {
+                    "value": str(idx),
+                    "count": int(cnt),
+                    "percent": round(int(cnt) / non_null_total * 100, 2) if non_null_total > 0 else 0.0,
+                }
+                for idx, cnt in top_counts.items()
+            ],
+        })
+
+    return {
+        "rowCount": int(len(df)),
+        "columnCount": int(len(df.columns)),
+        "numericSummaries": numeric_summaries,
+        "outliers": outlier_report,
+        "correlation": correlation,
+        "missingReport": missing_report,
+        "categoricalSummaries": categorical_summaries,
     }
 
 

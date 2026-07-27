@@ -6,3 +6,4 @@ scipy
 joblib
 numpy
 xgboost
+shap
