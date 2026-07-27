@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { usePipelineContext } from '../contexts/PipelineContext';
-import { Rocket, Activity, CheckCircle, ShieldAlert, Cpu } from 'lucide-react';
+import { Rocket, Activity, CheckCircle, ShieldAlert, Cpu, AlertCircle } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { Dataset } from '../types';
 
 interface DriftMetrics {
   [feature: string]: {
@@ -11,36 +12,86 @@ interface DriftMetrics {
   };
 }
 
-export default function MLOpsDashboard() {
-  const { expertMode, datasetProfile } = usePipelineContext();
+interface MLOpsDashboardProps {
+  dataset: Dataset;
+  target?: string;
+  features?: string[];
+}
+
+function pickColumns(row: Record<string, any>, cols: string[]): Record<string, any> {
+  const out: Record<string, any> = {};
+  cols.forEach(c => { out[c] = row[c]; });
+  return out;
+}
+
+export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashboardProps) {
+  const { expertMode } = usePipelineContext();
   const [deployStatus, setDeployStatus] = useState<'idle' | 'deploying' | 'online'>('idle');
+  const [deployError, setDeployError] = useState<string | null>(null);
   const [driftData, setDriftData] = useState<DriftMetrics | null>(null);
+  const [deploySummary, setDeploySummary] = useState<{ modelName: string; metricLabel: string; metricValue: number } | null>(null);
+
+  const resolvedTarget = (target && dataset.columns.some(c => c.name === target))
+    ? target
+    : dataset.columns[dataset.columns.length - 1]?.name;
 
   const handleDeploy = async () => {
+    if (!resolvedTarget || dataset.rows.length === 0) {
+      setDeployError('No active dataset or target column available to train against.');
+      return;
+    }
     setDeployStatus('deploying');
+    setDeployError(null);
     try {
       const response = await fetch('/api/train', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: [], target: 'mockTarget' }) // using mock
+        body: JSON.stringify({
+          data: dataset.rows,
+          target: resolvedTarget,
+          features: features && features.length > 0 ? features : undefined,
+          models: ['random_forest'],
+        })
       });
-      await response.json();
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.error || 'Deployment failed.');
+      }
+      const champion = body.champion;
+      setDeploySummary({
+        modelName: champion.modelName,
+        metricLabel: champion.primaryMetric,
+        metricValue: champion.primaryMetricValue,
+      });
       setDeployStatus('online');
       fetchDriftMetrics();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setDeployError(err.message || 'Deployment failed — is the ML compute service running?');
       setDeployStatus('idle');
     }
   };
 
+  // Honest, real drift check: this app has no separate live production traffic
+  // stream, so instead of inventing one, we run a real Kolmogorov-Smirnov test
+  // comparing the first half of the active dataset (reference) against the
+  // second half (current) on each numeric column.
   const fetchDriftMetrics = async () => {
+    const numericCols = dataset.columns.filter(c => c.type === 'numeric').map(c => c.name);
+    if (numericCols.length === 0 || dataset.rows.length < 20) return;
+
+    const mid = Math.floor(dataset.rows.length / 2);
+    const referenceRows = dataset.rows.slice(0, mid).map(r => pickColumns(r, numericCols));
+    const currentRows = dataset.rows.slice(mid).map(r => pickColumns(r, numericCols));
+
     try {
       const response = await fetch('/api/drift-metrics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reference_data: [], current_data: [] }) // mock arrays
+        body: JSON.stringify({ reference_data: referenceRows, current_data: currentRows })
       });
       const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Drift check failed.');
       setDriftData(data.drift_status);
     } catch (err) {
       console.error(err);
@@ -61,7 +112,7 @@ export default function MLOpsDashboard() {
           <Cpu className="w-6 h-6 text-indigo-400" />
           <div>
             <h2 className="text-lg font-bold text-white">MLOps Production Center</h2>
-            <p className="text-sm text-slate-400">Native Python Compute & Live Model Serving</p>
+            <p className="text-sm text-slate-400">Real Python Compute — trains an actual Random Forest on your active dataset</p>
           </div>
         </div>
 
@@ -71,16 +122,43 @@ export default function MLOpsDashboard() {
           className={`flex items-center gap-2 px-6 py-3 font-bold rounded-xl shadow-lg transition-all ${deployStatus === 'online' ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/50 cursor-default' : 'bg-indigo-600 hover:bg-indigo-500 text-white active:scale-95'}`}
         >
           {deployStatus === 'idle' && <><Rocket className="w-4 h-4" /> 1-Click Deploy</>}
-          {deployStatus === 'deploying' && <><Activity className="w-4 h-4 animate-spin" /> Provisioning Native Worker...</>}
+          {deployStatus === 'deploying' && <><Activity className="w-4 h-4 animate-spin" /> Training on Real Data...</>}
           {deployStatus === 'online' && <><CheckCircle className="w-4 h-4" /> Live Deployment Online</>}
         </button>
       </div>
 
+      {deployError && (
+        <div className="mb-6 p-3.5 bg-rose-500/10 border border-rose-500/20 text-rose-300 rounded-xl text-xs flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{deployError}</span>
+        </div>
+      )}
+
       {deployStatus === 'online' && (
         <div className="space-y-6">
+          {deploySummary && (
+            <div className="bg-emerald-950/20 border border-emerald-500/20 rounded-xl p-4 flex items-center justify-between">
+              <div>
+                <p className="text-[10px] text-emerald-400/80 uppercase tracking-wider font-bold font-mono">Real Trained Model</p>
+                <p className="text-sm text-white font-bold mt-0.5">{deploySummary.modelName}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] text-emerald-400/80 uppercase tracking-wider font-bold font-mono">{deploySummary.metricLabel}</p>
+                <p className="text-lg text-emerald-300 font-black mt-0.5">
+                  {deploySummary.metricLabel.toLowerCase().includes('accuracy')
+                    ? `${(deploySummary.metricValue * 100).toFixed(1)}%`
+                    : deploySummary.metricValue.toFixed(3)}
+                </p>
+              </div>
+            </div>
+          )}
+
           <div className="bg-slate-900 rounded-xl p-5 border border-slate-800">
-            <h3 className="text-sm font-bold text-white tracking-widest uppercase mb-4 mb-4">Data Drift Telemetry (KS-Test)</h3>
-            
+            <h3 className="text-sm font-bold text-white tracking-widest uppercase mb-4">Data Drift Telemetry (Real KS-Test)</h3>
+            <p className="text-[10.5px] text-slate-500 mb-4 -mt-2">
+              Comparing the first half of your active dataset (reference) against the second half (current) — this app has no separate live production stream, so this is a genuine statistical comparison of real historical data rather than simulated traffic.
+            </p>
+
             {!expertMode ? (
                // BEGINNER MODE: Simple badges
                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -93,6 +171,9 @@ export default function MLOpsDashboard() {
                      </div>
                    </div>
                  ))}
+                 {chartData.length === 0 && (
+                   <div className="col-span-3 text-center text-slate-500 text-xs py-4">No numeric columns available for drift analysis.</div>
+                 )}
                </div>
             ) : (
                // EXPERT MODE: Recharts visualization
@@ -102,7 +183,7 @@ export default function MLOpsDashboard() {
                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                      <XAxis dataKey="feature" tick={{ fill: '#64748b', fontSize: 12 }} axisLine={false} tickLine={false} />
                      <YAxis tick={{ fill: '#64748b', fontSize: 12 }} axisLine={false} tickLine={false} />
-                     <Tooltip 
+                     <Tooltip
                        contentStyle={{ backgroundColor: '#0f172a', borderColor: '#1e293b', borderRadius: '8px' }}
                        formatter={(value: number, name: string) => [value.toFixed(3), name === 'ksStat' ? 'KS-Statistic' : 'P-Value']}
                        labelStyle={{ color: '#94a3b8', fontWeight: 'bold', marginBottom: '4px' }}
@@ -113,7 +194,7 @@ export default function MLOpsDashboard() {
                  </ResponsiveContainer>
                </div>
             )}
-            {expertMode && <p className="text-xs text-slate-500 mt-4 leading-relaxed">* Kolmogorov-Smirnov test mapping real-time inference payloads against training distributions. Values peaking above the threshold signal model degradation.</p>}
+            {expertMode && <p className="text-xs text-slate-500 mt-4 leading-relaxed">* Real Kolmogorov-Smirnov test computed by the Python service between the two real data slices described above. Values peaking above the threshold signal a genuine distribution shift.</p>}
           </div>
         </div>
       )}

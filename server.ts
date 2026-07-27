@@ -114,6 +114,49 @@ async function generateContentWithRetry(client: GoogleGenAI, params: {
   throw lastError || new Error('GenerateContent failed across all primary and secondary fallback models');
 }
 
+// --- REAL ML COMPUTE: PYTHON MLOPS MICROSERVICE CLIENT ---
+// Every metric shown in the ML Pipeline UI must come from a model that was
+// actually fit and evaluated by this service — never from Gemini, and never
+// from a client-side formula. If the service is unreachable, callers must
+// surface a clear error instead of silently substituting fabricated numbers.
+const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://127.0.0.1:8000';
+const ML_SERVICE_TIMEOUT_MS = 120000; // real training can take a while on larger datasets
+
+async function callMlService(path: string, options: { method?: string; body?: any } = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ML_SERVICE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${ML_SERVICE_URL}${path}`, {
+      method: options.method || 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let parsed: any = null;
+    try { parsed = text ? JSON.parse(text) : null; } catch { /* non-JSON response */ }
+
+    if (!response.ok) {
+      const detail = parsed?.detail || parsed?.error || text || `HTTP ${response.status}`;
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    return parsed;
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new Error(`ML compute service timed out after ${ML_SERVICE_TIMEOUT_MS / 1000}s at ${ML_SERVICE_URL}.`);
+    }
+    const msg = String(err?.message || err);
+    if (/ECONNREFUSED|fetch failed|ENOTFOUND/i.test(msg)) {
+      throw new Error(
+        `ML compute service is unreachable at ${ML_SERVICE_URL}. Start it with: cd mlops_service && pip install -r requirements.txt && uvicorn main:app --reload --port 8000`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // 1. DATASET ANALYSIS & AUTOMATED MODEL RECOMMENDATION
 app.post('/api/analyze-dataset', async (req, res) => {
   const { filename, columns, rowCount } = req.body || {};
@@ -267,89 +310,130 @@ Respond strict JSON following the schema structure.`;
 });
 
 // 2. MACHINE LEARNING MODELLER & STAKEHOLDER REPORT
+// Real AutoML: this endpoint trains and evaluates genuine scikit-learn/XGBoost
+// models via the Python MLOps microservice. Gemini is invoked ONLY afterward,
+// strictly to narrate the real numbers in business language — its response
+// schema below has no numeric metric fields, so it is structurally incapable
+// of returning a fabricated accuracy/R2/F1/etc. If the compute service is
+// unreachable, this returns a clear error rather than silently faking results.
 app.post('/api/run-ml-prediction', async (req, res) => {
-  const { target, features, modelType, hyperparameters, datasetColumns, datasetRowsSample } = req.body || {};
+  const { target, features, modelType, hyperparameters, datasetRows } = req.body || {};
 
-  const safeTarget = typeof target === 'string' ? target : 'target';
-  const safeFeatures = Array.isArray(features) ? features.filter(f => typeof f === 'string') : [];
-  const safeModelType = typeof modelType === 'string' ? modelType : 'regression';
+  const safeTarget = typeof target === 'string' ? target : '';
+  const safeFeatures = Array.isArray(features) ? features.filter((f: any) => typeof f === 'string') : [];
   const safeHyperparameters = hyperparameters && typeof hyperparameters === 'object' ? hyperparameters : {};
-  const safeDatasetColumns = Array.isArray(datasetColumns) ? datasetColumns : [];
-  const safeDatasetRowsSample = Array.isArray(datasetRowsSample) ? datasetRowsSample : [];
+  const rows = Array.isArray(datasetRows) ? datasetRows : [];
 
-  const getSimulatedResponse = () => {
-    return simulateMLRunAndReport(safeTarget, safeFeatures, safeModelType, safeHyperparameters, safeDatasetColumns, safeDatasetRowsSample);
+  if (!safeTarget) {
+    return res.status(400).json({ error: 'A target column is required to train a model.' });
+  }
+  if (rows.length === 0) {
+    return res.status(400).json({ error: 'No dataset rows were provided. Upload and select a dataset before training.' });
+  }
+
+  const REAL_MODEL_KEYS = ['linear', 'random_forest', 'xgboost', 'mlp'];
+  const requestedAlgo = safeHyperparameters.selectedAlgorithmId || 'auto';
+  const models = requestedAlgo === 'auto'
+    ? ['linear', 'random_forest', 'xgboost']
+    : (REAL_MODEL_KEYS.includes(requestedAlgo) ? [requestedAlgo] : ['random_forest']);
+
+  const trainRatio = typeof safeHyperparameters.train_ratio === 'number' ? safeHyperparameters.train_ratio : 0.8;
+  const testSize = Math.min(0.5, Math.max(0.1, 1 - trainRatio));
+
+  let trainResult: any;
+  try {
+    trainResult = await callMlService('/train', {
+      body: {
+        data: rows,
+        target: safeTarget,
+        features: safeFeatures.length > 0 ? safeFeatures : undefined,
+        task_type: (modelType === 'classification' || modelType === 'regression') ? modelType : undefined,
+        models,
+        test_size: testSize,
+        cv_folds: 5,
+        hyperparameters: {
+          n_estimators: safeHyperparameters.n_estimators,
+          max_depth: safeHyperparameters.max_depth,
+          learning_rate: safeHyperparameters.learning_rate,
+          epochs: safeHyperparameters.epochs,
+        }
+      }
+    });
+  } catch (err: any) {
+    console.error('[AskDeepakAI ML] Real training call failed:', err);
+    return res.status(503).json({
+      error: err.message || 'The ML compute service is unavailable, so no model was trained.',
+      hint: 'Start the Python service: cd mlops_service && pip install -r requirements.txt && uvicorn main:app --reload --port 8000'
+    });
+  }
+
+  const champion = trainResult.champion;
+
+  // Everything numeric below comes straight from the trained model's real evaluation.
+  const baseResult = {
+    modelType: trainResult.task,
+    modelAlgorithm: champion.modelName,
+    modelId: champion.modelId,
+    hyperparameters: safeHyperparameters,
+    metrics: champion.metrics,
+    confusionMatrix: champion.confusionMatrix,
+    featureImportance: champion.featureImportance,
+    predictions: champion.predictions,
+    cv: champion.cv,
+    comparison: trainResult.comparison,
+    estimators: champion.estimators,
+    oobScore: champion.oobScore,
+    deepLearning: champion.deepLearning,
+    trainRows: champion.trainRows,
+    testRows: champion.testRows,
+    trainRatio: trainResult.trainRatio,
   };
 
   const client = getGeminiClient();
   const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
 
   if (!hasKey) {
-    console.log('[AskDeepakAI] No API key detected. Deploying direct smart forecast simulation report.');
-    return res.json(getSimulatedResponse());
+    console.log('[AskDeepakAI] No API key detected. Using a template narrative built from the real metrics above (no numbers invented).');
+    return res.json({ ...baseResult, ...buildTemplateNarrative(baseResult, safeTarget, safeFeatures) });
   }
 
   try {
-    const prompt = `You are an expert Machine Learning engineer and Business Advisor. A user has built a Machine Learning Pipeline on their cleaned dataset:
-- Target Variable Selected: "${safeTarget}"
-- Feature Variables: ${JSON.stringify(safeFeatures)}
-- ML Model Class Requested: ${safeModelType}
-- Configured Hyperparameters: ${JSON.stringify(safeHyperparameters)}
-- Data Sample Info (Columns & types): ${JSON.stringify(safeDatasetColumns)}
+    const realMetricsJson = JSON.stringify({
+      task: trainResult.task,
+      algorithm: champion.modelName,
+      metrics: champion.metrics,
+      confusionMatrix: champion.confusionMatrix,
+      crossValidation: champion.cv,
+      topFeatures: (champion.featureImportance || []).slice(0, 5),
+      comparisonAcrossModels: trainResult.comparison,
+      trainRows: champion.trainRows,
+      testRows: champion.testRows
+    });
 
-We need you to generate:
-1. Model hyperparameter tuning path (3 training trials with different parameter variations and output scores).
-2. True-to-life model metrics (Realistic test accuracy, F1, precision/recall, R2, RMSE matching the columns' structures).
-3. Strategic Business Risk Assessment (3 major potential hazards like data drift, class imbalance, or selection biases).
-4. Executive Stakeholder Strategic Recommendations (3 high-value advice vectors grounded in predicting this column).
-5. Data Scientist/Analyst Guideline (Which column they should manually audit/validate first to protect predictability).
-6. Comprehensive markdown-styled report.
+    const systemInstruction = `You are a Business Translator summarizing the results of a machine learning model that has ALREADY been trained and evaluated by a real scikit-learn/XGBoost pipeline on held-out test data. You will be given REAL_METRICS — the exact, final, computed results.
 
-Respond strictly with a JSON object.`;
+STRICT RULES (violating these is a critical failure):
+1. Do NOT invent, recompute, guess, or restate with different precision any numeric value. Every number you write must be copied verbatim from REAL_METRICS.
+2. Do NOT output metric fields yourself. Your only output is business narrative text: markdownReport, risks, recommendations, and scientistCallout.
+3. If you want to reference a number that is not present in REAL_METRICS, describe it qualitatively instead (e.g. "strong", "moderate") rather than fabricate a figure.
+4. Focus on: what these real results mean for the business, deployment risks, actionable recommendations, and which column an analyst should manually validate next.
+
+REAL_METRICS:
+${realMetricsJson}
+
+Target Variable: "${safeTarget}"
+Feature Variables: ${JSON.stringify(safeFeatures)}`;
 
     const aiResponse = await generateContentWithRetry(client, {
-      contents: prompt,
+      contents: 'Explain these real, already-computed model results in clear business language for a non-technical stakeholder. Reference numbers only from REAL_METRICS.',
       config: {
+        systemInstruction,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
-          required: ['metrics', 'featureImportance', 'tuningHistory', 'risks', 'recommendations', 'scientistCallout', 'markdownReport'],
+          required: ['markdownReport', 'risks', 'recommendations', 'scientistCallout'],
           properties: {
-            metrics: {
-              type: Type.OBJECT,
-              properties: {
-                accuracy: { type: Type.NUMBER },
-                precision: { type: Type.NUMBER },
-                recall: { type: Type.NUMBER },
-                f1Score: { type: Type.NUMBER },
-                r2Score: { type: Type.NUMBER },
-                mae: { type: Type.NUMBER },
-                rmse: { type: Type.NUMBER }
-              }
-            },
-            featureImportance: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                required: ['feature', 'score'],
-                properties: {
-                   feature: { type: Type.STRING },
-                   score: { type: Type.NUMBER }
-                }
-              }
-            },
-            tuningHistory: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                required: ['iteration', 'score', 'params'],
-                properties: {
-                  iteration: { type: Type.INTEGER },
-                  score: { type: Type.NUMBER },
-                  params: { type: Type.STRING }
-                }
-              }
-            },
+            markdownReport: { type: Type.STRING, description: 'Business-language markdown narrative. Any number cited must appear verbatim in REAL_METRICS.' },
             risks: {
               type: Type.ARRAY,
               items: {
@@ -382,28 +466,17 @@ Respond strictly with a JSON object.`;
                 justification: { type: Type.STRING },
                 pathways: { type: Type.ARRAY, items: { type: Type.STRING } }
               }
-            },
-            markdownReport: { type: Type.STRING }
+            }
           }
         }
       }
     });
 
-    const body = JSON.parse(aiResponse.text || '{}');
-    
-    // Inject realistic predictions coordinate points for visualization (Actual vs Predicted scatter or residual series)
-    const predictions = generatePredictionsForTarget(safeTarget, safeFeatures, safeModelType, safeDatasetRowsSample);
-    
-    return res.json({
-      modelType: safeModelType,
-      modelAlgorithm: safeModelType === 'classification' ? 'RandomForestClassifier' : 'GradientBoostingRegressor',
-      hyperparameters: safeHyperparameters,
-      ...body,
-      predictions
-    });
+    const narrative = JSON.parse(aiResponse.text || '{}');
+    return res.json({ ...baseResult, ...narrative });
   } catch (apiError: any) {
-    console.error('[AskDeepakAI Gemini Client] Error during ML pipeline run:', apiError);
-    return res.status(500).json({ error: apiError.message || String(apiError) });
+    console.error('[AskDeepakAI Gemini Client] Narrative generation failed, using template narrative built from real metrics:', apiError);
+    return res.json({ ...baseResult, ...buildTemplateNarrative(baseResult, safeTarget, safeFeatures) });
   }
 });
 
@@ -1354,34 +1427,64 @@ app.post('/api/validate-schema', (req, res) => {
   return res.json({ status: "success", message: "Schema validated for Data Warehouse ingestion" });
 });
 
-// Mock MLOps API Layer (simulating the Python FastAPI service)
-app.post('/api/train', (req, res) => {
-  const { data, target } = req.body;
-  if (!data || !target) return res.status(400).json({ error: "Missing training data or target" });
-  
-  // Simulated training time
-  setTimeout(() => {
-    res.json({ status: "Model trained successfully via Native Compute", task: "mock_classification", Accuracy: 0.94 });
-  }, 1500);
+// Real MLOps API Layer — thin proxies to the Python FastAPI compute service.
+// No mock data here: if the Python service is down, callers get a clear 503
+// error rather than a fabricated "success" response.
+app.post('/api/train', async (req, res) => {
+  const { data, target } = req.body || {};
+  if (!Array.isArray(data) || data.length === 0 || !target) {
+    return res.status(400).json({ error: 'Missing training data or target column.' });
+  }
+  try {
+    const result = await callMlService('/train', { body: req.body });
+    return res.json(result);
+  } catch (err: any) {
+    console.error('[AskDeepakAI] /api/train proxy failed:', err);
+    return res.status(503).json({ error: err.message || 'ML compute service unavailable.' });
+  }
 });
 
-app.post('/api/predict', (req, res) => {
-  const { features } = req.body;
-  if (!features || !Array.isArray(features)) return res.status(400).json({ error: "Missing features array" });
-  
-  // Return random predictions
-  const predictions = features.map(() => Math.random() > 0.5 ? 1 : 0);
-  res.json({ predictions });
+app.post('/api/predict', async (req, res) => {
+  const { features } = req.body || {};
+  if (!features || !Array.isArray(features)) {
+    return res.status(400).json({ error: 'Missing features array' });
+  }
+  try {
+    const result = await callMlService('/predict', { body: req.body });
+    return res.json(result);
+  } catch (err: any) {
+    console.error('[AskDeepakAI] /api/predict proxy failed:', err);
+    return res.status(503).json({ error: err.message || 'ML compute service unavailable.' });
+  }
 });
 
-app.post('/api/drift-metrics', (req, res) => {
-    // Return mock KS-Test scores for data drift visualization
-    const drift_status = {
-        "Feature A": { ks_stat: 0.05, p_value: 0.42, drift_detected: false },
-        "Feature B": { ks_stat: 0.12, p_value: 0.02, drift_detected: true },
-        "Feature C": { ks_stat: 0.08, p_value: 0.15, drift_detected: false }
-    };
-    res.json({ drift_status });
+app.post('/api/drift-metrics', async (req, res) => {
+  try {
+    const result = await callMlService('/drift-metrics', { body: req.body });
+    return res.json(result);
+  } catch (err: any) {
+    console.error('[AskDeepakAI] /api/drift-metrics proxy failed:', err);
+    return res.status(503).json({ error: err.message || 'ML compute service unavailable.' });
+  }
+});
+
+// Streams the real, genuinely-fitted joblib artifact back from the Python service.
+app.get('/api/ml/download/:modelId', async (req, res) => {
+  try {
+    const upstream = await fetch(`${ML_SERVICE_URL}/download/${encodeURIComponent(req.params.modelId)}`);
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => '');
+      return res.status(upstream.status).json({ error: text || 'Model not found or expired. Train again.' });
+    }
+    const disposition = upstream.headers.get('content-disposition');
+    if (disposition) res.setHeader('Content-Disposition', disposition);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/octet-stream');
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    return res.send(buffer);
+  } catch (err: any) {
+    console.error('[AskDeepakAI] /api/ml/download proxy failed:', err);
+    return res.status(503).json({ error: 'ML compute service is unavailable, so the model artifact cannot be downloaded.' });
+  }
 });
 
 async function start() {
@@ -1466,176 +1569,60 @@ function getDefaultAnalysisFallback(filename: string, columns: any[], rowCount: 
   };
 }
 
-function simulateMLRunAndReport(
-  target: string,
-  features: string[],
-  modelType: string,
-  hyperparameters: Record<string, any>,
-  columns: any[],
-  sampleRows: any[]
-) {
-  const isClassification = modelType === 'classification' || target.toLowerCase().includes('churn') || target.toLowerCase().includes('fail');
-  const alg = isClassification ? 'RandomForestClassifier' : 'GradientBoostingRegressor';
-  
-  const featureImportance = features.map((f, i) => ({
-    feature: f,
-    score: parseFloat((1 - i * 0.15 - Math.random() * 0.1).toFixed(4))
-  })).map(item => ({ ...item, score: item.score > 0 ? item.score : 0.05 }));
+// Truthful, non-AI fallback narrative used only when GEMINI_API_KEY isn't
+// configured or the interpretation call fails. Every figure it quotes is read
+// straight out of baseResult (the real Python training response) — nothing
+// here is invented, unlike the metrics this function used to fabricate.
+function buildTemplateNarrative(baseResult: any, target: string, features: string[]) {
+  const isClassification = baseResult.modelType === 'classification';
+  const m = baseResult.metrics || {};
+  const scoreLine = isClassification
+    ? `Accuracy: ${(((m.accuracy ?? 0)) * 100).toFixed(1)}% · F1: ${(((m.f1Score ?? 0)) * 100).toFixed(1)}% · Precision: ${(((m.precision ?? 0)) * 100).toFixed(1)}% · Recall: ${(((m.recall ?? 0)) * 100).toFixed(1)}%`
+    : `R²: ${(m.r2Score ?? 0).toFixed(3)} · RMSE: ${(m.rmse ?? 0).toFixed(2)} · MAE: ${(m.mae ?? 0).toFixed(2)}`;
 
-  const sumScores = featureImportance.reduce((acc, x) => acc + x.score, 0);
-  featureImportance.forEach(item => { item.score = parseFloat((item.score / sumScores).toFixed(3)); });
-  featureImportance.sort((a,b)=> b.score - a.score);
+  const topFeatures: string[] = (baseResult.featureImportance || []).slice(0, 3).map((f: any) => f.feature);
+  const cv = baseResult.cv;
+  const cvLine = cv && typeof cv.mean === 'number'
+    ? `#### Cross-Validation (${cv.folds}-fold)\nMean ${cv.metric}: ${cv.metric === 'accuracy' ? (cv.mean * 100).toFixed(1) + '%' : cv.mean.toFixed(3)} (± ${cv.std.toFixed(3)})\n`
+    : '';
 
-  const score1 = isClassification ? 0.78 : 0.72;
-  const score2 = isClassification ? 0.84 : 0.81;
-  const score3 = isClassification ? 0.89 : 0.87;
+  const markdownReport = `### Model Performance Brief: predicting ${target}
 
-  const tuningHistory = [
-    { iteration: 1, score: score1, params: "estimators=50, depth=5" },
-    { iteration: 2, score: score2, params: "estimators=100, depth=8" },
-    { iteration: 3, score: score3, params: "estimators=150, depth=12, rate=0.1" }
-  ];
+**Algorithm**: ${baseResult.modelAlgorithm}
+**Train / Test rows**: ${baseResult.trainRows ?? '-'} / ${baseResult.testRows ?? '-'}
 
-  const metrics = isClassification ? {
-    accuracy: 0.894,
-    precision: 0.885,
-    recall: 0.862,
-    f1Score: 0.873
-  } : {
-    r2Score: 0.868,
-    mae: 142.15,
-    rmse: 198.42
-  };
+#### Real Evaluation Results (held-out test set)
+${scoreLine}
 
-  const risks = [
-    {
-      title: "Data Disparity & Missing Log Imbalance",
-      riskLevel: "High" as const,
-      description: "Class/variable distribution is highly skewed. Standard predictors might get biassed towards majority patterns, risking higher false negatives."
-    },
-    {
-      title: "Temporal Feedback Loops",
-      riskLevel: "Medium" as const,
-      description: "Using delayed indicators to infer real-time behaviors triggers target leakage risks. Continuous model metrics validation is strongly advised."
-    },
-    {
-      title: "Feature Correlation Leaks",
-      riskLevel: "Medium" as const,
-      description: "Features collected closely with the Target column can cause inflated accuracy in testing but catastrophic failure rates in live environments."
-    }
-  ];
+${cvLine}
+#### Top Predictive Features
+${topFeatures.length > 0 ? topFeatures.map((f, i) => `${i + 1}. ${f}`).join('\n') : 'No feature importances were returned for this model.'}
 
-  const recommendations = [
-    {
-      title: "Incentivize Long-term Contract Onboarding",
-      impact: "High" as const,
-      details: "Design personalized promotions aimed at shifting standard Month-to-month contracts to 12-month subscriptions, as stability correlates heavily with lower risk."
-    },
-    {
-      title: "Deploy Automated Alerts on Support Surcharges",
-      impact: "High" as const,
-      details: "Set up real-time slack/workflow triggers as soon as customer support tickets opened count climbs above 3 of any enterprise subscribers."
-    },
-    {
-      title: "Continuous Machine Learning Model Validation",
-      impact: "Medium" as const,
-      details: "Set up rolling evaluations every 30 days to re-train weights, monitoring model decay ratios when seasonal behavioral variances peak."
-    }
-  ];
-
-  const scientistCallout = {
-    focusColumns: features.slice(0, 2),
-    justification: `These feature covariates explain over 65% of the prediction entropy. Deep analytical deep-dives are required to understand underlying sub-trends.`,
-    pathways: [
-      "Plot interaction scatter plots between primary features against target metrics.",
-      "Segment target outcomes across critical thresholds using range selections."
-    ]
-  };
-
-  const markdownReport = `### 🚀 Executive Model Performance Brief: predicting ${target}
-
-The Machine Learning Pipeline has successfully executed an automated model optimization protocol using **${alg}** and completed 3 hyperparameter tuning iterations.
-
-#### 📊 Model Evaluation Summary
-- **Primary Algorithm**: ${alg}
-- **Training Splits**: 80% Train, 20% Test validation
-${isClassification ? `
-- **Test Accuracy**: 89.4%
-- **F1-Score**: 87.3%
-- **Precision / Recall**: 88.5% / 86.2%
-` : `
-- **R-Squared Score**: 0.868 (The model explains 86.8% of variance)
-- **Mean Absolute Error (MAE)**: 142.15
-- **Root Mean Squared Error (RMSE)**: 198.42
-`}
-
-#### 🔍 Hyperparameters Chosen
-The optimized modeling configuration utilizes standard hyperparameter parameters determined via grid evaluation:
-\`\`\`json
-{
-  "n_estimators": 150,
-  "max_depth": 12,
-  "learning_rate": 0.1,
-  "random_state": 42
-}
-\`\`\`
-
-#### 💡 Executive Technical Insights
-1. **Critical Predictors**: The model isolated the key features which holds the highest impact on target expectations.
-2. **Robust Resilience**: Minimal error gaps between evaluation and test sets confirm high generalizations of results.`;
+_These numbers come directly from a scikit-learn/XGBoost model trained and evaluated on a held-out test split. Configure GEMINI_API_KEY for an AI-written business narrative of these same results._`;
 
   return {
-    modelType,
-    modelAlgorithm: alg,
-    hyperparameters,
-    metrics,
-    featureImportance,
-    tuningHistory,
-    risks,
-    recommendations,
-    scientistCallout,
-    markdownReport
-  };
-}
-
-function generatePredictionsForTarget(target: string, features: string[], modelType: string, rows: any[]) {
-  const isClassification = modelType === 'classification' || target.toLowerCase().includes('churn') || target.toLowerCase().includes('fail');
-  const targetTypeNumeric = rows.length > 0 && typeof rows[0][target] === 'number';
-
-  return rows.slice(0, 30).map((row, index) => {
-    // Generate actual vs predicted values logically linked
-    let actual: number | string = '';
-    let predicted: number | string = '';
-    let residual = 0;
-
-    if (isClassification) {
-      const origVal = row[target];
-      actual = origVal !== null && origVal !== undefined ? String(origVal) : 'No';
-      
-      // Simulate close predictions
-      const match = Math.random() > 0.15;
-      predicted = match ? actual : (actual === 'Yes' || actual === '1' || actual === 'true' ? 'No' : 'Yes');
-    } else {
-      const baseVal = typeof row[target] === 'number' ? row[target] : (500 + index * 10);
-      actual = parseFloat(Number(baseVal).toFixed(2));
-      
-      const errorPct = (Math.random() - 0.5) * 0.15; // up to 15% error
-      predicted = parseFloat((actual * (1 + errorPct)).toFixed(2));
-      residual = parseFloat((actual - predicted).toFixed(2));
+    markdownReport,
+    risks: [
+      {
+        title: 'Single Held-Out Split',
+        riskLevel: 'Medium' as const,
+        description: `These metrics reflect one random ${Math.round((1 - (baseResult.trainRatio ?? 0.8)) * 100)}% held-out test split. Re-run with a different split or monitor live performance before fully trusting the model in production.`
+      }
+    ],
+    recommendations: [
+      {
+        title: 'Validate the Top Feature With a Domain Expert',
+        impact: 'High' as const,
+        details: `"${topFeatures[0] || 'the top-ranked feature'}" carries the highest measured importance for predicting ${target}. Confirm this matches business intuition before acting on it.`
+      }
+    ],
+    scientistCallout: {
+      focusColumns: topFeatures.slice(0, 2).length > 0 ? topFeatures.slice(0, 2) : features.slice(0, 2),
+      justification: 'These are the columns with the largest real feature-importance weights extracted from the trained model.',
+      pathways: [
+        `Plot ${topFeatures[0] || 'the top feature'} against ${target} to visually confirm the relationship.`,
+        'Re-run training with a different random seed or test split to check how stable these metrics are.'
+      ]
     }
-
-    // Capture first 3 feature values for tooltips
-    const featureValues: Record<string, any> = {};
-    features.slice(0, 3).forEach(f => {
-      featureValues[f] = row[f];
-    });
-
-    return {
-      id: index + 1,
-      actual,
-      predicted,
-      residual,
-      featureValues
-    };
-  });
+  };
 }
