@@ -131,6 +131,11 @@ class EdaRequest(BaseModel):
     data: list[dict[str, Any]]
 
 
+class HypothesisTestRequest(BaseModel):
+    data: list[dict[str, Any]]
+    columns: list[str]
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -882,3 +887,71 @@ def drift_metrics(request: DriftRequest):
             }
 
     return {"drift_status": drift_report}
+
+
+@app.post("/hypothesis-test")
+def run_hypothesis_test(request: HypothesisTestRequest):
+    """Runs a genuine statistical test between two real columns from the
+    actual dataset. The test type - Pearson correlation, Welch's t-test,
+    one-way ANOVA, or a chi-squared test of independence - is chosen
+    automatically from each column's real dtype and group cardinality, and
+    computed via scipy.stats. Never a placeholder or random value."""
+    if not request.data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+    if len(request.columns) != 2:
+        raise HTTPException(status_code=400, detail="Exactly two columns are required to test a relationship.")
+
+    df = pd.DataFrame(request.data)
+    col_a, col_b = request.columns
+    missing = [c for c in (col_a, col_b) if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Column(s) not found in data: {missing}")
+
+    sub = df[[col_a, col_b]].dropna()
+    if len(sub) < 4:
+        raise HTTPException(status_code=400, detail="Need at least 4 complete rows across both columns to run a test.")
+
+    a_numeric = pd.api.types.is_numeric_dtype(sub[col_a])
+    b_numeric = pd.api.types.is_numeric_dtype(sub[col_b])
+
+    if a_numeric and b_numeric:
+        stat, p_value = stats.pearsonr(sub[col_a], sub[col_b])
+        test_name = "Pearson Correlation"
+        basis = f"Pearson correlation between {col_a} and {col_b} across {len(sub)} rows."
+    elif a_numeric != b_numeric:
+        numeric_col, group_col = (col_a, col_b) if a_numeric else (col_b, col_a)
+        groups = [g.dropna().to_numpy() for _, g in sub.groupby(group_col)[numeric_col]]
+        groups = [g for g in groups if len(g) > 0]
+        if len(groups) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{group_col} needs at least 2 distinct groups with data to compare {numeric_col} across.",
+            )
+        if len(groups) == 2:
+            stat, p_value = stats.ttest_ind(groups[0], groups[1], equal_var=False)
+            test_name = "Two-Sample T-Test (Welch)"
+            basis = f"Welch's t-test comparing {numeric_col} across the 2 groups of {group_col} ({len(sub)} rows)."
+        else:
+            stat, p_value = stats.f_oneway(*groups)
+            test_name = "One-Way ANOVA"
+            basis = f"One-way ANOVA comparing {numeric_col} across {len(groups)} groups of {group_col} ({len(sub)} rows)."
+    else:
+        contingency = pd.crosstab(sub[col_a], sub[col_b])
+        if contingency.shape[0] < 2 or contingency.shape[1] < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Need at least 2 distinct categories in both {col_a} and {col_b} to run a chi-squared test.",
+            )
+        stat, p_value, dof, _ = stats.chi2_contingency(contingency)
+        test_name = "Chi-Squared Test of Independence"
+        basis = f"Chi-squared test of independence between {col_a} and {col_b} ({len(sub)} rows, {dof} degrees of freedom)."
+
+    p_value = float(p_value)
+    return {
+        "testName": test_name,
+        "testStatistic": round(float(stat), 4),
+        "pValue": round(p_value, 6),
+        "rejectNull": bool(p_value < 0.05),
+        "sampleSize": int(len(sub)),
+        "basis": basis,
+    }

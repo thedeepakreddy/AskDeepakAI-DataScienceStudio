@@ -1188,6 +1188,19 @@ Return strict JSON: { "interpretation": "Your interpretation here..." }`;
   }
 });
 
+// Real hypothesis test - proxies to the Python service's scipy.stats computation.
+// This is what runTest() in HypothesisLab.tsx calls; the result then gets
+// narrated (not computed) by /api/hypothesis-lab/interpret above.
+app.post('/api/hypothesis-lab/run-test', async (req, res) => {
+  try {
+    const result = await callMlService('/hypothesis-test', { body: req.body });
+    return res.json(result);
+  } catch (err: any) {
+    console.error('[AskDeepakAI] /api/hypothesis-lab/run-test proxy failed:', err);
+    return res.status(503).json({ error: err.message || 'ML compute service unavailable.' });
+  }
+});
+
 // MODULE 4: A/B Test Interpreter
 app.post('/api/ab-test-interpreter', async (req, res) => {
   const { results } = req.body || {};
