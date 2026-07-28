@@ -578,11 +578,12 @@ export default function MLPipeline({
                 className="w-full bg-[#111625] border border-slate-800 rounded-xl p-3 text-xs text-white font-mono focus:ring-1 focus:ring-indigo-500 font-bold cursor-pointer"
               >
                 <option value="auto" className="font-mono border-b border-slate-700 bg-emerald-900/20 text-emerald-300 font-black">
-                  AUTO: Train &amp; Compare Linear, Random Forest &amp; XGBoost
+                  AUTO: Train &amp; Compare All 5 Real Candidates
                 </option>
 
                 <optgroup label="Ensemble & Tree Builders" className="text-indigo-300 font-black mt-2">
                   <option value="random_forest" className="font-mono text-slate-300 font-medium">Random Forest</option>
+                  <option value="gradient_boosting" className="font-mono text-slate-300 font-medium">Gradient Boosting</option>
                   <option value="xgboost" className="font-mono text-slate-300 font-medium">XGBoost (eXtreme Gradient Boosting)</option>
                 </optgroup>
 
@@ -596,7 +597,7 @@ export default function MLPipeline({
               </select>
               <p className="text-[10px] text-slate-450 leading-tight mt-1.5 px-0.5 font-sans">
                 {selectedAlgorithmId === 'auto'
-                  ? `Trains 3 real models on the same split and picks the highest-scoring one on held-out test data.`
+                  ? `Trains 5 real models (Linear, Random Forest, Gradient Boosting, XGBoost, MLP) on the same split and picks the highest-scoring one on held-out test data. Slower but most thorough — for very large datasets, picking a single algorithm below is faster and less likely to time out.`
                   : `Trains a single real "${selectedAlgorithmId.replace('_', ' ').toUpperCase()}" model.`}
               </p>
             </div>

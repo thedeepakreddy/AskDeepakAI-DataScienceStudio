@@ -120,7 +120,10 @@ async function generateContentWithRetry(client: GoogleGenAI, params: {
 // from a client-side formula. If the service is unreachable, callers must
 // surface a clear error instead of silently substituting fabricated numbers.
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://127.0.0.1:8000';
-const ML_SERVICE_TIMEOUT_MS = 120000; // real training can take a while on larger datasets
+// AutoML mode fits 5 real candidate models (with cross-validation refits) on
+// the full dataset; on a free-tier host's slower, shared CPU a several
+// -thousand-row dataset can genuinely take a few minutes, not seconds.
+const ML_SERVICE_TIMEOUT_MS = 240000;
 
 // Free-tier PaaS hosts (Render included) spin an idle service down and take
 // ~25-60s to cold-start the next request; during that window their own edge
