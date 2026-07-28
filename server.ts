@@ -166,6 +166,26 @@ async function callMlService(path: string, options: { method?: string; body?: an
         throw new Error(`ML compute service timed out after ${ML_SERVICE_TIMEOUT_MS / 1000}s at ${ML_SERVICE_URL}.`);
       }
       const msg = String(err?.message || err);
+      // Node's fetch (undici) wraps connection-level failures in a generic
+      // "fetch failed" TypeError; the real signal lives in .cause. A dropped/
+      // reset connection - the origin accepted the connection and then died
+      // mid-request, e.g. an OOM crash during a large training job - needs
+      // different handling (and is worth retrying, since the host likely
+      // restarts) than a target that was never reachable at all.
+      const causeMsg = String((err as any)?.cause?.message || (err as any)?.cause || '');
+      const isConnectionDropped = /terminated|other side closed|socket hang up|ECONNRESET|EPIPE/i.test(`${msg} ${causeMsg}`);
+
+      if (isConnectionDropped) {
+        if (attempt < GATEWAY_RETRY_DELAYS_MS.length) {
+          const delay = GATEWAY_RETRY_DELAYS_MS[attempt];
+          console.log(`[AskDeepakAI ML] Connection to ml-service dropped mid-request (likely crashed/restarted under load) - retrying in ${delay}ms (attempt ${attempt + 1}/${GATEWAY_RETRY_DELAYS_MS.length})...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw new Error(
+          `The ML compute service's connection was interrupted while processing this request, most likely because it ran out of memory and restarted during a large training job. If this keeps happening on the same dataset, try switching off "Auto" and training a single algorithm instead of all 5, or training on fewer rows.`
+        );
+      }
       if (/ECONNREFUSED|fetch failed|ENOTFOUND/i.test(msg)) {
         throw new Error(
           `ML compute service is unreachable at ${ML_SERVICE_URL}. Start it with: cd mlops_service && pip install -r requirements.txt && uvicorn main:app --reload --port 8000`

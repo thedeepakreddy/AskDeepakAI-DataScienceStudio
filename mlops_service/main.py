@@ -5,6 +5,7 @@ Real, honest model training. Every number returned by this service comes from
 an actually-fitted scikit-learn / XGBoost estimator evaluated on a held-out
 test split — nothing here is narrated or guessed by an LLM.
 """
+import gc
 import os
 import time
 import uuid
@@ -620,9 +621,23 @@ def train_model(request: TrainRequest):
     scoring = "accuracy" if task == "classification" else "r2"
     cv_folds = min(request.cv_folds, y_train.value_counts().min()) if task == "classification" else request.cv_folds
     cv_folds = max(cv_folds, 2)
+    # Large datasets: cap folds at 3. More rows per fold already gives a
+    # statistically stable CV estimate as data grows, so the dominant cost
+    # (a full pipeline refit per fold, per candidate model) stays roughly
+    # bounded instead of scaling with both row count and fold count at once -
+    # this is what keeps AutoML mode (5 candidates x refits) from running the
+    # free-tier host out of memory/time on a real-sized dataset.
+    if len(X_train) > 5000:
+        cv_folds = min(cv_folds, 3)
 
     results = []
     errors = []
+    # Every candidate's fitted pipeline is kept here only for the duration of
+    # this request. Only the champion actually gets handed to store_model()
+    # below - the other candidates were only ever needed for this comparison,
+    # and permanently caching all 5 in the global model_store on every
+    # AutoML run was pure memory bloat that accumulates across a session.
+    fitted_pipelines: dict[str, Pipeline] = {}
 
     for model_key in requested_models:
         try:
@@ -727,14 +742,10 @@ def train_model(request: TrainRequest):
                     "features": {c: to_native(X_test.loc[row_idx, c]) for c in feature_cols[:5]},
                 })
 
-            model_id = store_model(pipeline, {
-                "task": task, "target": request.target, "features": feature_cols, "modelKey": model_key,
-            })
-
             results.append({
                 "modelKey": model_key,
                 "modelName": display_name(model_key, task),
-                "modelId": model_id,
+                "modelId": None,  # only the selected champion gets stored - see below
                 "metrics": metrics,
                 "confusionMatrix": confusion,
                 "featureImportance": feature_importance,
@@ -749,8 +760,16 @@ def train_model(request: TrainRequest):
                 "trainRows": int(len(X_train)),
                 "testRows": int(len(X_test)),
             })
+            fitted_pipelines[model_key] = pipeline
         except Exception as model_err:
             errors.append({"modelKey": model_key, "error": str(model_err)})
+        finally:
+            # Encourage prompt release of the (potentially large) pipeline,
+            # preprocessed arrays, and CV fold copies for this candidate
+            # before moving on to the next one - AutoML mode fits 5 of these
+            # in a row, and peak memory on a constrained host is dominated by
+            # how much of that stays garbage-but-uncollected at once.
+            gc.collect()
 
     if not results:
         raise HTTPException(status_code=500, detail=f"All requested models failed to train: {errors}")
@@ -759,17 +778,25 @@ def train_model(request: TrainRequest):
     champion = results[0]
     selection_reason = build_selection_reason(results)
 
+    # Only the champion's fitted pipeline is ever referenced again (by
+    # /predict and /download), so it's the only one actually persisted.
+    champion_pipeline = fitted_pipelines[champion["modelKey"]]
+    champion["modelId"] = store_model(champion_pipeline, {
+        "task": task, "target": request.target, "features": feature_cols, "modelKey": champion["modelKey"],
+    })
+
     # Real SHAP explainability for the champion only (computing it for every
     # candidate would multiply training time for no benefit to the user).
     champion["shapImportance"] = None
     if HAS_SHAP:
-        champion_stored = model_store.get(champion["modelId"])
-        if champion_stored:
-            sample_n = min(100, len(X_test))
-            X_shap_sample = X_test.iloc[:sample_n]
-            champion["shapImportance"] = compute_shap_importance(
-                champion_stored["pipeline"], X_shap_sample, champion["modelKey"], task
-            )
+        sample_n = min(100, len(X_test))
+        X_shap_sample = X_test.iloc[:sample_n]
+        champion["shapImportance"] = compute_shap_importance(
+            champion_pipeline, X_shap_sample, champion["modelKey"], task
+        )
+
+    fitted_pipelines.clear()
+    gc.collect()
 
     return {
         "status": "success",
