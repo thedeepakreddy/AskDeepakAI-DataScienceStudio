@@ -78,8 +78,10 @@ export default function EDAReport({ dataset, aiAnalysis, loadingAI, onTriggerAI 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ datasetRows: dataset.rows })
       });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || body.hint || 'EDA request failed.');
+      const text = await res.text();
+      let body: any = null;
+      try { body = text ? JSON.parse(text) : null; } catch { /* host returned a non-JSON gateway page */ }
+      if (!res.ok) throw new Error(body?.error || body?.hint || `EDA request failed (HTTP ${res.status}). The ML compute service may still be waking up from an idle sleep — try again in a moment.`);
       setDeepEdaResult(body);
     } catch (err: any) {
       setDeepEdaError(err.message || 'Real EDA computation failed — is the ML compute service running?');

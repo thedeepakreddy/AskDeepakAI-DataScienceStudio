@@ -54,9 +54,11 @@ export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashb
           models: ['random_forest'],
         })
       });
-      const body = await response.json();
+      const text = await response.text();
+      let body: any = null;
+      try { body = text ? JSON.parse(text) : null; } catch { /* host returned a non-JSON gateway page */ }
       if (!response.ok) {
-        throw new Error(body.error || 'Deployment failed.');
+        throw new Error(body?.error || `Deployment failed (HTTP ${response.status}). The ML compute service may still be waking up from an idle sleep — try again in a moment.`);
       }
       const champion = body.champion;
       setDeploySummary({
@@ -92,8 +94,10 @@ export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashb
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reference_data: referenceRows, current_data: currentRows })
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Drift check failed.');
+      const text = await response.text();
+      let data: any = null;
+      try { data = text ? JSON.parse(text) : null; } catch { /* host returned a non-JSON gateway page */ }
+      if (!response.ok) throw new Error(data?.error || `Drift check failed (HTTP ${response.status}).`);
       setDriftData(data.drift_status);
     } catch (err: any) {
       console.error(err);
