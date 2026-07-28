@@ -17,7 +17,7 @@ This project was rebuilt to close that gap. Every metric a user sees — accurac
 *   **What is it?** A Full-Stack Data Science, AI, and MLOps workstation that automates data ingestion, cleaning, EDA, and machine learning pipelines entirely in the browser.
 *   **The Big Innovation:** Features dual interfaces. **Beginner Mode** abstracts complex math away for business users, while **Expert Mode** unlocks production-grade MLOps configurations, ETL pipeline exports, and Python FastAPI integrations.
 *   **Tech Stack:** React (TypeScript, Vite, Tailwind, Recharts) frontend, Node.js/Express orchestration backend, Python (FastAPI, Scikit-learn, XGBoost) microservice, and Google Gemini API for semantic AI reasoning.
-*   **Key Features:** Visual SQL builder, zero-telemetry local CSV processing, data drift monitoring (KS-Tests), Hyperparameter tuning, and a 3D-orbiting intelligent Chatbot assistant.
+*   **Key Features:** An agentic analysis mode (Gemini function-calling a real reason → act → observe loop against the ML service), a visual SQL builder, zero-telemetry local CSV processing, data drift monitoring (KS-Tests), hyperparameter tuning, and a 3D-orbiting intelligent Chatbot assistant.
 
 ---
 
@@ -98,6 +98,7 @@ This application is engineered to meet strict industry standards for reliability
 *   **Interactive Simulation Parameters**: Custom hyperparameters let you seamlessly tune tree structural constraints, Random Forest iterations, estimator depths, and custom Cross-Validation Testing ratios (Test Splits).
 *   **Algorithmic Benchmarking Outputs**: Depending on the target column class, the workspace auto-detects Regression or Classification algorithms natively. Generates visual scorecards of metrics including **R-squared ($R^2$)**, **Mean Squared Error (MSE)**, **Accuracy**, **Precision**, and **F1-Score**.
 *   **Model Explainer Visualizer**: Generates interactive global feature importance metrics in a horizontal visualization, illustrating how specific parameters shift the specific algorithmic logic weights.
+*   **Agentic Analysis Mode**: Gemini reasons over the champion model's real metrics and a real EDA summary, then executes real diagnostic/fix steps against the ML service — a genuine reason → act → observe loop using Gemini's function-calling API (never free-text command parsing), constrained to a fixed, whitelisted set of real functions (`retrain_with_transform`, `drop_feature`, `check_multicollinearity` via real VIF). Every step's before/after metric is real; the agent's `reasoning` text is the only LLM-authored part of a step and is never treated as a source of truth for a number. Capped at 5 steps, with an explicit stop reason shown (cap reached, plateaued, or the agent judged itself done) — never an opaque black box.
 
 ### Stage 5: Stakeholder Dashboard
 *   **Interactive Multi-Metric Slicers**: Fast segment slicer panels let you slice complex numerical properties or categorical states dynamically.
@@ -194,13 +195,14 @@ The clip below is a real, unedited run captured directly against the running app
 | **Styles** | **Tailwind CSS** | v4.x — High-fidelity utility classes & themes |
 | **Graphs & Charts** | **Recharts & Lucide** | Interactive visualizations, scatter plots, trend lines, SVG Icons |
 | **Server Engine** | **Node.js / Express** | Compact REST API wrapper and static web asset middleware, proxies to the Python ML microservice |
-| **AI Processing** | **Google GenAI SDK** | `@google/genai` v2.4.x — Gemini model API integrations, narration-only (see [The Problem](#-the-problem)) |
+| **AI Processing** | **Google GenAI SDK** | `@google/genai` v2.4.x — Gemini API integrations. Narration-only outside agentic mode (see [The Problem](#-the-problem)); in agentic mode, Gemini only *triggers* real functions via structured function-calling — it never computes a metric itself |
+| **Agent Orchestration** | **Gemini function-calling** | `FunctionCallingConfigMode.ANY` against a fixed, whitelisted tool set — reason → act → observe loop, capped at 5 steps, never free-text command parsing |
 | **Server Compiler** | **esbuild** | Ultra-fast JS/TS server compiler bundling to standalone CommonJS |
 | **ML Microservice** | **FastAPI** | Python compute engine — the source of every real number in the app |
 | **Model Training** | **scikit-learn / XGBoost** | Real `Pipeline`s (imputation + scaling/encoding + estimator), 5 candidate models, k-fold cross-validation |
 | **Explainability** | **SHAP** | `TreeExplainer` / `LinearExplainer` per algorithm — real feature attribution, not a guessed ranking |
-| **Data Analysis** | **pandas / NumPy / SciPy** | Real EDA (correlation, skew, IQR outliers), KS-test drift detection |
-| **Testing** | **pytest** | 21 tests: real metric-range assertions, EDA numbers cross-checked against independent pandas computation |
+| **Data Analysis** | **pandas / NumPy / SciPy** | Real EDA (correlation, skew, IQR outliers), KS-test drift detection, real VIF multicollinearity checks |
+| **Testing** | **pytest** | 39 tests: real metric-range assertions, EDA numbers cross-checked against independent pandas computation, agent function coverage |
 | **Lint / CI** | **ruff, tsc, GitHub Actions** | Lint + test + typecheck + build on every push — see the badge at the top of this README |
 | **Containerization** | **Docker / docker-compose** | One-command local dev for the full stack — see [Local Development Setup](#-local-development-setup) |
 

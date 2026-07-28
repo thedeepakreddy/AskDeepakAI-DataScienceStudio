@@ -8,7 +8,7 @@ import path from 'path';
 import fs from 'fs';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, FunctionCallingConfigMode } from '@google/genai';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -1199,6 +1199,229 @@ app.post('/api/hypothesis-lab/run-test', async (req, res) => {
     console.error('[AskDeepakAI] /api/hypothesis-lab/run-test proxy failed:', err);
     return res.status(503).json({ error: err.message || 'ML compute service unavailable.' });
   }
+});
+
+// --------------------------------------------------------------------------
+// PHASE 2: Agentic analysis mode.
+//
+// A real reason -> act -> observe loop. Gemini is given the champion model's
+// real metrics and a real EDA summary, and must call exactly one of a fixed,
+// whitelisted set of real ml-service functions per turn (function-calling
+// mode ANY, never free-text parsing). Each call executes a genuine retrain,
+// feature drop, or VIF computation against the Python service; the real
+// result is fed back to Gemini before it decides on the next step. There is
+// no path here to arbitrary code execution - only these functions.
+// --------------------------------------------------------------------------
+
+const AGENT_MAX_STEPS = 5;
+const AGENT_PLATEAU_THRESHOLD = 0.01; // stop if the latest step's relative gain falls below 1%
+
+const AGENT_TOOLS = [
+  {
+    name: 'retrain_with_transform',
+    description: 'Apply a real transform (log, sqrt, or standardize) to one numeric column - a feature or the target - and retrain the current model on the transformed data. Use this to address skew or scale issues visible in the real EDA output.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        reasoning: { type: Type.STRING, description: 'Why this is worth trying, grounded in the real metrics/EDA you were given. Do not state a specific numeric outcome here - only the real result returned after this call is authoritative.' },
+        column: { type: Type.STRING, description: 'The exact real column name to transform. Must be numeric.' },
+        method: { type: Type.STRING, enum: ['log', 'sqrt', 'standardize'], description: 'Which transform to apply.' },
+      },
+      required: ['reasoning', 'column', 'method'],
+    },
+  },
+  {
+    name: 'drop_feature',
+    description: 'Retrain the current model excluding one real feature. Use this if a feature looks noisy, redundant, or flagged by a multicollinearity check.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        reasoning: { type: Type.STRING, description: 'Why this feature is suspected to hurt the model.' },
+        feature: { type: Type.STRING, description: 'The exact real feature column name to drop.' },
+      },
+      required: ['reasoning', 'feature'],
+    },
+  },
+  {
+    name: 'check_multicollinearity',
+    description: 'Compute real Variance Inflation Factor (VIF) scores for the current numeric features. Use this as a diagnostic before deciding whether to drop a feature.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        reasoning: { type: Type.STRING, description: 'Why you want to check multicollinearity right now.' },
+      },
+      required: ['reasoning'],
+    },
+  },
+  {
+    name: 'declare_done',
+    description: 'Stop the analysis loop because further steps are unlikely to help, or a satisfying conclusion has been reached.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        reasoning: { type: Type.STRING, description: 'Why you are stopping now.' },
+      },
+      required: ['reasoning'],
+    },
+  },
+];
+
+const AGENT_TOOL_NAMES = AGENT_TOOLS.map(t => t.name);
+
+app.post('/api/agent/run', async (req, res) => {
+  const { data, target, features, modelKey, primaryMetric, primaryMetricValue } = req.body || {};
+
+  if (!Array.isArray(data) || data.length === 0 || !target || !modelKey || typeof primaryMetricValue !== 'number') {
+    return res.status(400).json({ error: 'data, target, modelKey, and a real primaryMetricValue are required to start the agent.' });
+  }
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(503).json({ error: 'Agentic mode requires a configured GEMINI_API_KEY - there is no honest way to run a reasoning loop without a real LLM to reason with. (Everything else in this app degrades to a template narrative without a key; this feature cannot, because the reasoning itself is the point.)' });
+  }
+
+  const client = getGeminiClient();
+
+  let edaSummary: any = null;
+  try {
+    edaSummary = await callMlService('/eda', { body: { data } });
+  } catch (err: any) {
+    console.warn('[Agent] Real EDA fetch failed, proceeding without it:', err.message);
+  }
+  const compactEda = edaSummary ? {
+    numericSummaries: (edaSummary.numericSummaries || []).map((s: any) => ({ column: s.column, mean: s.mean, std: s.std, skew: s.skew })),
+    outliers: (edaSummary.outliers || []).filter((o: any) => o.outlierCount > 0).map((o: any) => ({ column: o.column, outlierPercent: o.outlierPercent })),
+    missingReport: (edaSummary.missingReport || []).filter((m: any) => m.missingCount > 0).map((m: any) => ({ column: m.column, missingPercent: m.missingPercent })),
+  } : null;
+
+  let currentFeatures: string[] | null = Array.isArray(features) && features.length > 0 ? [...features] : null;
+  let bestMetricValue = primaryMetricValue;
+  let bestModelId: string | null = null;
+  const triedActions = new Set<string>();
+  const steps: any[] = [];
+
+  const systemInstruction = `You are an ML diagnostics agent working on a REAL trained model - not a simulation. You will be given real metrics and a real EDA summary. On each turn, propose exactly ONE real diagnostic or fix by calling one of the provided tools. Ground every "reasoning" argument in the actual numbers you were given; never invent a statistic. After each call you will be told the REAL result before your next turn. You have at most ${AGENT_MAX_STEPS} steps - call declare_done as soon as further steps are unlikely to help.`;
+
+  const history: any[] = [{
+    role: 'user',
+    parts: [{
+      text: `Current champion model: ${modelKey} on target "${target}".
+Real ${primaryMetric}: ${primaryMetricValue}.
+Real feature list: ${JSON.stringify(currentFeatures)}
+Real EDA summary (numeric column stats, outliers, missing values): ${JSON.stringify(compactEda)}
+
+Propose the next diagnostic or fix.`,
+    }],
+  }];
+
+  let stopReason = 'cap_reached';
+
+  for (let stepNum = 1; stepNum <= AGENT_MAX_STEPS; stepNum++) {
+    let response;
+    try {
+      response = await generateContentWithRetry(client, {
+        contents: history,
+        config: {
+          systemInstruction,
+          tools: [{ functionDeclarations: AGENT_TOOLS }],
+          toolConfig: {
+            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: AGENT_TOOL_NAMES },
+          },
+        },
+      });
+    } catch (err: any) {
+      steps.push({ step: stepNum, error: err.message || 'Agent reasoning call failed.' });
+      stopReason = 'error';
+      break;
+    }
+
+    const calls = response.functionCalls;
+    if (!calls || calls.length === 0) {
+      stopReason = 'no_action_proposed';
+      break;
+    }
+    const call = calls[0];
+    history.push({ role: 'model', parts: [{ functionCall: { name: call.name, args: call.args } }] });
+
+    if (call.name === 'declare_done') {
+      steps.push({ step: stepNum, tool: 'declare_done', reasoning: (call.args as any)?.reasoning });
+      stopReason = 'agent_declared_done';
+      break;
+    }
+
+    const actionKey = `${call.name}:${JSON.stringify(call.args)}`;
+    if (triedActions.has(actionKey)) {
+      history.push({ role: 'user', parts: [{ functionResponse: { name: call.name!, response: { output: { note: 'This exact action was already tried this run. Propose something different or call declare_done.' } } } }] });
+      continue;
+    }
+    triedActions.add(actionKey);
+
+    let toolResult: any = null;
+    let toolError: string | null = null;
+    try {
+      const args: any = call.args || {};
+      if (call.name === 'retrain_with_transform') {
+        toolResult = await callMlService('/agent/retrain-with-transform', {
+          body: { data, target, features: currentFeatures, model_key: modelKey, column: args.column, method: args.method },
+        });
+      } else if (call.name === 'drop_feature') {
+        toolResult = await callMlService('/agent/drop-feature', {
+          body: { data, target, features: currentFeatures, model_key: modelKey, drop_feature: args.feature },
+        });
+      } else if (call.name === 'check_multicollinearity') {
+        toolResult = await callMlService('/agent/check-multicollinearity', {
+          body: { data, features: currentFeatures || [] },
+        });
+      } else {
+        toolError = `Unknown tool "${call.name}" - not in the whitelist.`;
+      }
+    } catch (err: any) {
+      toolError = err.message || String(err);
+    }
+
+    const stepRecord: any = { step: stepNum, tool: call.name, args: call.args, reasoning: (call.args as any)?.reasoning };
+
+    if (toolError) {
+      stepRecord.error = toolError;
+      history.push({ role: 'user', parts: [{ functionResponse: { name: call.name!, response: { error: toolError } } }] });
+    } else {
+      stepRecord.result = toolResult;
+      if (toolResult && typeof toolResult.primaryMetricValue === 'number') {
+        const before = bestMetricValue;
+        const after = toolResult.primaryMetricValue;
+        stepRecord.metricBefore = before;
+        stepRecord.metricAfter = after;
+        stepRecord.improved = after > before;
+        if (stepRecord.improved) {
+          bestMetricValue = after;
+          bestModelId = toolResult.modelId;
+          if (call.name === 'drop_feature' && Array.isArray(toolResult.remainingFeatures)) {
+            currentFeatures = toolResult.remainingFeatures;
+          }
+        }
+      }
+      history.push({ role: 'user', parts: [{ functionResponse: { name: call.name!, response: { output: toolResult } } }] });
+    }
+
+    steps.push(stepRecord);
+
+    if (!toolError && typeof stepRecord.metricBefore === 'number' && stepNum > 1) {
+      const denom = Math.abs(stepRecord.metricBefore) > 1e-9 ? Math.abs(stepRecord.metricBefore) : 1;
+      const relativeGain = (stepRecord.metricAfter - stepRecord.metricBefore) / denom;
+      if (relativeGain < AGENT_PLATEAU_THRESHOLD) {
+        stopReason = 'plateau';
+        break;
+      }
+    }
+  }
+
+  return res.json({
+    steps,
+    startingMetricValue: primaryMetricValue,
+    finalPrimaryMetricValue: bestMetricValue,
+    finalModelId: bestModelId,
+    stopReason,
+    maxSteps: AGENT_MAX_STEPS,
+    whitelistedFunctions: AGENT_TOOL_NAMES,
+  });
 });
 
 // MODULE 4: A/B Test Interpreter
