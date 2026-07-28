@@ -122,38 +122,59 @@ async function generateContentWithRetry(client: GoogleGenAI, params: {
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://127.0.0.1:8000';
 const ML_SERVICE_TIMEOUT_MS = 120000; // real training can take a while on larger datasets
 
-async function callMlService(path: string, options: { method?: string; body?: any } = {}) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), ML_SERVICE_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${ML_SERVICE_URL}${path}`, {
-      method: options.method || 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let parsed: any = null;
-    try { parsed = text ? JSON.parse(text) : null; } catch { /* non-JSON response */ }
+// Free-tier PaaS hosts (Render included) spin an idle service down and take
+// ~25-60s to cold-start the next request; during that window their own edge
+// proxy - not this app's Python service - answers with a bare 502/503/504
+// before the origin container has registered. Retrying with backoff rides
+// out that window instead of surfacing the platform's raw gateway HTML page.
+const GATEWAY_RETRY_STATUSES = new Set([502, 503, 504]);
+const GATEWAY_RETRY_DELAYS_MS = [3000, 5000, 8000, 12000, 18000, 25000]; // ~71s total coverage
 
-    if (!response.ok) {
-      const detail = parsed?.detail || parsed?.error || text || `HTTP ${response.status}`;
-      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+async function callMlService(path: string, options: { method?: string; body?: any } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), ML_SERVICE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${ML_SERVICE_URL}${path}`, {
+        method: options.method || 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      let parsed: any = null;
+      try { parsed = text ? JSON.parse(text) : null; } catch { /* non-JSON response, e.g. a platform gateway HTML page */ }
+
+      if (!response.ok) {
+        if (GATEWAY_RETRY_STATUSES.has(response.status) && attempt < GATEWAY_RETRY_DELAYS_MS.length) {
+          const delay = GATEWAY_RETRY_DELAYS_MS[attempt];
+          console.log(`[AskDeepakAI ML] Gateway ${response.status} from ml-service (likely a free-tier cold start) - retrying in ${delay}ms (attempt ${attempt + 1}/${GATEWAY_RETRY_DELAYS_MS.length})...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        const detail = parsed?.detail || parsed?.error || (parsed ? JSON.stringify(parsed) : null);
+        if (detail) throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        throw new Error(
+          GATEWAY_RETRY_STATUSES.has(response.status)
+            ? `The ML compute service is waking up from an idle sleep (its free-tier host spins it down after inactivity) and still hasn't responded after ~${Math.round(GATEWAY_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0) / 1000)}s of retries. It should be warm now - please try again.`
+            : `HTTP ${response.status}`
+        );
+      }
+      return parsed;
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        throw new Error(`ML compute service timed out after ${ML_SERVICE_TIMEOUT_MS / 1000}s at ${ML_SERVICE_URL}.`);
+      }
+      const msg = String(err?.message || err);
+      if (/ECONNREFUSED|fetch failed|ENOTFOUND/i.test(msg)) {
+        throw new Error(
+          `ML compute service is unreachable at ${ML_SERVICE_URL}. Start it with: cd mlops_service && pip install -r requirements.txt && uvicorn main:app --reload --port 8000`
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    return parsed;
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
-      throw new Error(`ML compute service timed out after ${ML_SERVICE_TIMEOUT_MS / 1000}s at ${ML_SERVICE_URL}.`);
-    }
-    const msg = String(err?.message || err);
-    if (/ECONNREFUSED|fetch failed|ENOTFOUND/i.test(msg)) {
-      throw new Error(
-        `ML compute service is unreachable at ${ML_SERVICE_URL}. Start it with: cd mlops_service && pip install -r requirements.txt && uvicorn main:app --reload --port 8000`
-      );
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -234,8 +255,8 @@ Respond strict JSON following the database schema structure.`;
     const parsedData = JSON.parse(aiResponse.text || '{}');
     return res.json(parsedData);
   } catch (apiError: any) {
-    console.error('[AskDeepakAI Gemini Client] Error during dataset scan:', apiError);
-    return res.status(500).json({ error: apiError.message || String(apiError) });
+    console.error('[AskDeepakAI Gemini Client] Error during dataset scan, using template fallback:', apiError);
+    return res.json(getFallback());
   }
 });
 
@@ -246,15 +267,16 @@ app.post('/api/pipeline-intelligence', async (req, res) => {
   const client = getGeminiClient();
   const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
 
+  const getPipelineIntelligenceFallback = () => ({
+    detectedDomain: 'Generic Data',
+    inferredProblem: 'Analyze the dataset for trends and patterns.',
+    recommendedTarget: datasetProfile?.columns?.[datasetProfile?.columns?.length - 1]?.name || 'Unknown',
+    pipelineStrategy: 'Standard data analysis pipeline focusing on basic descriptive and predictive analytics.',
+    stageInstructions: {}
+  });
+
   if (!hasKey) {
-    // Fallback response if no key
-    return res.json({
-      detectedDomain: 'Generic Data',
-      inferredProblem: 'Analyze the dataset for trends and patterns.',
-      recommendedTarget: datasetProfile?.columns?.[datasetProfile?.columns?.length - 1]?.name || 'Unknown',
-      pipelineStrategy: 'Standard data analysis pipeline focusing on basic descriptive and predictive analytics.',
-      stageInstructions: {}
-    });
+    return res.json(getPipelineIntelligenceFallback());
   }
 
   try {
@@ -304,8 +326,8 @@ Respond strict JSON following the schema structure.`;
     const parsedData = JSON.parse(aiResponse.text || '{}');
     return res.json(parsedData);
   } catch (err: any) {
-    console.error('[AskDeepakAI] Pipeline Intelligence Error:', err);
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Pipeline Intelligence Error, using template fallback:', err);
+    return res.json(getPipelineIntelligenceFallback());
   }
 });
 
@@ -1029,6 +1051,12 @@ app.post('/api/log-training-data', async (req, res) => {
 app.post('/api/sql-assistant', async (req, res) => {
   const { schema, question } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.status(503).json({ error: 'SQL generation requires a configured GEMINI_API_KEY - there is no honest offline way to translate arbitrary English into SQL, so this feature cannot fall back to a template like the other modules.' });
+  }
+
   try {
     const prompt = `You are an expert SQL Generator. Given the following database schema (or csv headers):
 ${schema}
@@ -1056,7 +1084,8 @@ Return strict JSON with exactly this structure:
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] SQL Assistant error:', err);
+    return res.status(503).json({ error: 'AI SQL generation is temporarily unavailable (the model is likely rate-limited). Please try again in a moment.' });
   }
 });
 
@@ -1064,6 +1093,12 @@ Return strict JSON with exactly this structure:
 app.post('/api/deep-quality-audit', async (req, res) => {
   const { auditSummary } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.json({ fixes: buildDeepQualityAuditFallback(auditSummary) });
+  }
+
   try {
     const prompt = `You are a Data Quality Engineer. Given this data quality audit summary:
 ${JSON.stringify(auditSummary)}
@@ -1107,7 +1142,8 @@ Return strict JSON:
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Deep Quality Audit error, using template fixes built from the real audit summary:', err);
+    return res.json({ fixes: buildDeepQualityAuditFallback(auditSummary) });
   }
 });
 
@@ -1115,6 +1151,12 @@ Return strict JSON:
 app.post('/api/hypothesis-lab/generate', async (req, res) => {
   const { columns, dataSample } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.status(503).json({ error: 'Hypothesis generation requires a configured GEMINI_API_KEY - proposing meaningful business hypotheses needs real language understanding, not a template. (You can still test any two columns directly - see the "Run This Test" panel, which always uses a real scipy.stats computation.)' });
+  }
+
   try {
     const prompt = `You are a Principal Data Scientist. Given these columns and sample data:
 Columns: ${JSON.stringify(columns)}
@@ -1157,13 +1199,21 @@ Return strict JSON:
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Hypothesis Lab generate error:', err);
+    return res.status(503).json({ error: 'AI hypothesis generation is temporarily unavailable (the model is likely rate-limited). Please try again in a moment.' });
   }
 });
 
 app.post('/api/hypothesis-lab/interpret', async (req, res) => {
   const { hypothesis, result } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    const r = result || {};
+    return res.json({ interpretation: `Real test result: ${r.testName || 'statistical test'} on ${r.sampleSize ?? 'the'} rows produced a p-value of ${r.pValue ?? 'N/A'}, so the null hypothesis is ${r.rejectNull ? 'rejected' : 'not rejected'} at the 0.05 significance level. Configure GEMINI_API_KEY for an AI-written plain-English interpretation of this same real result.` });
+  }
+
   try {
     const prompt = `You are a Data Science Translator. Given this hypothesis and statistical test result:
 Hypothesis: ${JSON.stringify(hypothesis)}
@@ -1184,7 +1234,9 @@ Return strict JSON: { "interpretation": "Your interpretation here..." }`;
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Hypothesis Lab interpret error:', err);
+    const r = result || {};
+    return res.json({ interpretation: `Real test result: ${r.testName || 'statistical test'} on ${r.sampleSize ?? 'the'} rows produced a p-value of ${r.pValue ?? 'N/A'}, so the null hypothesis is ${r.rejectNull ? 'rejected' : 'not rejected'} at the 0.05 significance level. (AI narration is temporarily unavailable; this is a template built from the same real numbers.)` });
   }
 });
 
@@ -1428,6 +1480,12 @@ Propose the next diagnostic or fix.`,
 app.post('/api/ab-test-interpreter', async (req, res) => {
   const { results } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.status(503).json({ error: 'A/B test memo generation requires a configured GEMINI_API_KEY.' });
+  }
+
   try {
     const prompt = `You are a Product Analyst. Given these A/B test results:
 ${JSON.stringify(results)}
@@ -1447,7 +1505,8 @@ Return strict JSON: { "memo": "Memo content..." }`;
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] A/B Test Interpreter error:', err);
+    return res.status(503).json({ error: 'AI memo generation is temporarily unavailable (the model is likely rate-limited). Please try again in a moment.' });
   }
 });
 
@@ -1455,6 +1514,12 @@ Return strict JSON: { "memo": "Memo content..." }`;
 app.post('/api/model-explainer', async (req, res) => {
   const { featureImportance, metrics, context } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.json(buildModelExplainerFallback(featureImportance, metrics));
+  }
+
   try {
     const prompt = `You are an AI Explainer. Given the following model feature importance, metrics, and context:
 Feature Importance: ${JSON.stringify(featureImportance)}
@@ -1502,7 +1567,8 @@ Return strict JSON:
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Model Explainer error, using template narrative built from the real feature importance/metrics:', err);
+    return res.json(buildModelExplainerFallback(featureImportance, metrics));
   }
 });
 
@@ -1510,6 +1576,12 @@ Return strict JSON:
 app.post('/api/executive-pdf-report', async (req, res) => {
   const { reportData } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.json({ executiveSummary: 'Configure GEMINI_API_KEY to generate an AI-written executive summary. All underlying figures in this report are already real, computed values from the pipeline stages above.' });
+  }
+
   try {
     const prompt = `You are a Chief Data Officer. Given the compiled data from all stages of analysis:
 ${JSON.stringify(reportData)}
@@ -1529,7 +1601,8 @@ Return strict JSON: { "executiveSummary": "Summary here..." }`;
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Executive PDF Report error:', err);
+    return res.json({ executiveSummary: 'AI-written executive summary is temporarily unavailable (the model is likely rate-limited). All underlying figures in this report are still real, computed values from the pipeline stages above.' });
   }
 });
 
@@ -1537,6 +1610,12 @@ Return strict JSON: { "executiveSummary": "Summary here..." }`;
 app.post('/api/etl-script-generator', async (req, res) => {
   const { transformations } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.status(503).json({ error: 'ETL script generation requires a configured GEMINI_API_KEY.' });
+  }
+
   try {
     const prompt = `You are a Data Engineer. Given these data cleaning and transformation steps applied by the user:
 ${JSON.stringify(transformations)}
@@ -1562,7 +1641,8 @@ Return strict JSON with the python code:
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] ETL Script Generator error:', err);
+    return res.status(503).json({ error: 'AI ETL script generation is temporarily unavailable (the model is likely rate-limited). Please try again in a moment.' });
   }
 });
 
@@ -1570,6 +1650,12 @@ Return strict JSON with the python code:
 app.post('/api/dashboard/auto-configure', async (req, res) => {
   const { profile, customProblem } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.json(buildDashboardAutoConfigFallback(profile, customProblem));
+  }
+
   try {
     const prompt = `You are an expert dashboard designer. Given this dataset profile:
 ${JSON.stringify(profile)}
@@ -1628,7 +1714,8 @@ Return strict JSON:
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Dashboard auto-configure error, using a rule-based default layout:', err);
+    return res.json(buildDashboardAutoConfigFallback(profile, customProblem));
   }
 });
 
@@ -1636,6 +1723,12 @@ Return strict JSON:
 app.post('/api/dashboard/insight-banner', async (req, res) => {
   const { dataStateSummary } = req.body || {};
   const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    return res.json({ insights: [] });
+  }
+
   try {
     const prompt = `You are an executive business analyst. Given this summary of the current filtered data state on a dashboard:
 ${JSON.stringify(dataStateSummary)}
@@ -1661,7 +1754,8 @@ Return strict JSON:
     });
     return res.json(JSON.parse(aiResponse.text || '{}'));
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || String(err) });
+    console.error('[AskDeepakAI] Dashboard insight banner error:', err);
+    return res.json({ insights: [] });
   }
 });
 
@@ -2000,4 +2094,119 @@ function buildEdaTemplateNarrative(edaResult: any) {
   ].filter((s): s is string => !!s);
 
   return { summary, dataQualityFlags, recommendedNextSteps };
+}
+
+// Truthful, non-AI fixes for the Deep Quality Audit — used only when
+// GEMINI_API_KEY isn't configured or the interpretation call fails. Every
+// issue here was already found by real, client-computed checks (missing
+// counts, constant columns, high-cardinality, mixed types); this only
+// supplies a mechanical, genuinely-correct pandas snippet for each one,
+// nothing about the underlying finding is invented.
+function buildDeepQualityAuditFallback(auditSummary: any) {
+  const fixes: Array<{ issueName: string; severity: string; description: string; pythonFix: string }> = [];
+  const columnIssues = Array.isArray(auditSummary?.columnIssues) ? auditSummary.columnIssues : [];
+  const duplicateRows = auditSummary?.duplicateRows || 0;
+
+  if (duplicateRows > 0) {
+    fixes.push({
+      issueName: 'Duplicate rows',
+      severity: duplicateRows > (auditSummary?.totalRows || 0) * 0.05 ? 'High' : 'Medium',
+      description: `Found ${duplicateRows} fully duplicate row(s) across the dataset.`,
+      pythonFix: `df.drop_duplicates(inplace=True)`
+    });
+  }
+
+  for (const col of columnIssues) {
+    if (col.missingCount > 0) {
+      fixes.push({
+        issueName: `Missing values in ${col.name}`,
+        severity: parseFloat(col.missingPercentage) > 30 ? 'High' : parseFloat(col.missingPercentage) > 10 ? 'Medium' : 'Low',
+        description: `${col.missingCount} missing value(s) (${col.missingPercentage}) found in "${col.name}".`,
+        pythonFix: `df['${col.name}'] = df['${col.name}'].fillna(df['${col.name}'].median() if pd.api.types.is_numeric_dtype(df['${col.name}']) else df['${col.name}'].mode()[0])`
+      });
+    }
+    if (col.isConstant) {
+      fixes.push({
+        issueName: `Constant column ${col.name}`,
+        severity: 'Low',
+        description: `"${col.name}" has only 1 unique value across all rows and carries no predictive signal.`,
+        pythonFix: `df.drop(columns=['${col.name}'], inplace=True)`
+      });
+    }
+    if (col.isHighCardinality) {
+      fixes.push({
+        issueName: `High cardinality in ${col.name}`,
+        severity: 'Medium',
+        description: `"${col.name}" has ${col.uniqueValues} distinct values relative to the row count, which can overwhelm one-hot encoding.`,
+        pythonFix: `# Consider target/frequency encoding instead of one-hot for high-cardinality columns\nfreq = df['${col.name}'].value_counts(normalize=True)\ndf['${col.name}_freq_encoded'] = df['${col.name}'].map(freq)`
+      });
+    }
+    if (col.typeMismatchWarning) {
+      fixes.push({
+        issueName: `Mixed types in ${col.name}`,
+        severity: 'Medium',
+        description: `"${col.name}" contains a mix of string and numeric values.`,
+        pythonFix: `df['${col.name}'] = pd.to_numeric(df['${col.name}'], errors='coerce')`
+      });
+    }
+  }
+
+  return fixes;
+}
+
+// Truthful, non-AI narrative for the Model Explainer — used only when
+// GEMINI_API_KEY isn't configured or the interpretation call fails. Every
+// feature name and score here is copied verbatim from the real, already-
+// computed featureImportance/metrics passed in; nothing is invented.
+function buildModelExplainerFallback(featureImportance: any, metrics: any) {
+  const ranked = (Array.isArray(featureImportance) ? featureImportance : []).slice(0, 3);
+  const m = metrics || {};
+  const metricLine = typeof m.accuracy === 'number'
+    ? `${(m.accuracy * 100).toFixed(1)}% accuracy`
+    : typeof m.r2Score === 'number'
+      ? `an R² of ${m.r2Score.toFixed(3)}`
+      : 'the metrics shown';
+
+  return {
+    overallSummary: `Configure GEMINI_API_KEY for an AI-written explanation. In the meantime: this model reached ${metricLine}, and its real, measured feature-importance weights are listed below in ranked order.`,
+    topFeatures: ranked.map((f: any) => ({
+      featureName: f.feature,
+      explanation: `"${f.feature}" carries a real measured importance score of ${f.score} in the trained model — the highest-weighted features drive most of its predictions.`,
+      impact: `Higher or lower values of "${f.feature}" shift the model's prediction more than most other features.`,
+      insight: `Validate whether "${f.feature}"'s relationship with the target matches domain expectations before trusting this model in production.`
+    }))
+  };
+}
+
+// Rule-based dashboard layout — used only when GEMINI_API_KEY isn't
+// configured or the interpretation call fails. Recommends components with
+// an empty columnsToUse so the frontend's own column-selection fallback
+// (IntelligentDashboardLayer's getColsForComp) picks real columns from the
+// real dataset profile; nothing here is a fabricated insight, just a
+// sensible default layout.
+function buildDashboardAutoConfigFallback(profile: any, customProblem?: string) {
+  const columns = Array.isArray(profile?.columns) ? profile.columns : [];
+  const numericCols = columns.filter((c: any) => c.type === 'numeric').map((c: any) => c.name);
+  const categoricalCols = columns.filter((c: any) => c.type === 'categorical' || c.type === 'boolean').map((c: any) => c.name);
+
+  const recommendedComponents: Array<{ type: string; columnsToUse: string[]; questionAnswered: string; whyRelevant: string }> = [
+    { type: 'KPI Cards', columnsToUse: [], questionAnswered: 'What are the current headline numbers?', whyRelevant: 'Numeric columns summarized at a glance.' }
+  ];
+  if (categoricalCols.length > 0 && numericCols.length > 0) {
+    recommendedComponents.push({ type: 'Bar Chart', columnsToUse: [], questionAnswered: 'How does the metric break down by category?', whyRelevant: 'A categorical and a numeric column are both available.' });
+  }
+  if (numericCols.length > 0) {
+    recommendedComponents.push({ type: 'Histogram', columnsToUse: [], questionAnswered: 'How is this metric distributed?', whyRelevant: 'Numeric columns are present to profile.' });
+  }
+  if (numericCols.length >= 2) {
+    recommendedComponents.push({ type: 'Heatmap Correlation Matrix', columnsToUse: [], questionAnswered: 'Which numeric features move together?', whyRelevant: 'At least 2 numeric columns are available to correlate.' });
+  }
+  recommendedComponents.push({ type: 'Data Table', columnsToUse: [], questionAnswered: 'What do the raw records look like?', whyRelevant: 'A row-level view is always useful alongside aggregates.' });
+
+  return {
+    recommendedComponents,
+    topKPIs: numericCols.slice(0, 5),
+    detectedDomain: 'Generic Data',
+    detectedProblem: customProblem || 'Analyze the dataset for trends and patterns.'
+  };
 }
