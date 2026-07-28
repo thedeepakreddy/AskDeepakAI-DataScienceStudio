@@ -191,3 +191,42 @@ export interface EdaReport {
     recommendedNextSteps: string[];
   };
 }
+
+// Phase 2: agentic analysis mode. Gemini proposes each step via real
+// function-calling (never free-text parsing); every `result` field below is
+// the genuine response from the corresponding mlops_service /agent/* call —
+// `reasoning` is the only LLM-authored text in a step, and it is never used
+// as the source of a number shown elsewhere.
+export interface AgentStep {
+  step: number;
+  tool?: 'retrain_with_transform' | 'drop_feature' | 'check_multicollinearity' | 'declare_done';
+  reasoning?: string;
+  args?: Record<string, any>;
+  result?: {
+    modelKey?: string;
+    modelName?: string;
+    modelId?: string;
+    primaryMetric?: string;
+    primaryMetricValue?: number;
+    transformApplied?: { column: string; method: string };
+    targetWasTransformed?: boolean;
+    droppedFeature?: string;
+    remainingFeatures?: string[];
+    vifScores?: { feature: string; vif: number | null; rSquared: number; highRisk: boolean }[];
+    highRiskFeatures?: string[];
+  };
+  metricBefore?: number;
+  metricAfter?: number;
+  improved?: boolean;
+  error?: string;
+}
+
+export interface AgentRunResult {
+  steps: AgentStep[];
+  startingMetricValue: number;
+  finalPrimaryMetricValue: number;
+  finalModelId: string | null;
+  stopReason: 'cap_reached' | 'plateau' | 'agent_declared_done' | 'no_action_proposed' | 'error';
+  maxSteps: number;
+  whitelistedFunctions: string[];
+}

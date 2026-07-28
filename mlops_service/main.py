@@ -131,6 +131,35 @@ class EdaRequest(BaseModel):
     data: list[dict[str, Any]]
 
 
+class HypothesisTestRequest(BaseModel):
+    data: list[dict[str, Any]]
+    columns: list[str]
+
+
+class AgentRetrainTransformRequest(BaseModel):
+    data: list[dict[str, Any]]
+    target: str
+    features: list[str] | None = None
+    model_key: str
+    column: str
+    method: Literal["log", "sqrt", "standardize"]
+    task_type: Literal["classification", "regression"] | None = None
+
+
+class AgentDropFeatureRequest(BaseModel):
+    data: list[dict[str, Any]]
+    target: str
+    features: list[str] | None = None
+    model_key: str
+    drop_feature: str
+    task_type: Literal["classification", "regression"] | None = None
+
+
+class AgentVifRequest(BaseModel):
+    data: list[dict[str, Any]]
+    features: list[str]
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -359,6 +388,51 @@ def to_native(value):
     if isinstance(value, float) and np.isnan(value):
         return None
     return value
+
+
+def apply_column_transform(series: pd.Series, method: str) -> pd.Series:
+    """Real, deterministic column transforms for the agentic loop. Shifts
+    only when the data's actual range requires it to stay in-domain, so a
+    log transform on already-positive data is untouched."""
+    s = series.astype(float)
+    if method == "log":
+        min_val = float(s.min())
+        shift = (1.0 - min_val) if min_val <= 0 else 0.0
+        return np.log1p(s + shift)
+    if method == "sqrt":
+        min_val = float(s.min())
+        shift = (0.0 - min_val) if min_val < 0 else 0.0
+        return np.sqrt(s + shift)
+    if method == "standardize":
+        std = float(s.std())
+        return (s - s.mean()) / std if std > 0 else s - s.mean()
+    raise ValueError(f"Unknown transform method: {method}")
+
+
+def compute_vif(df: pd.DataFrame, numeric_cols: list[str]) -> list[dict[str, Any]]:
+    """Real Variance Inflation Factor per numeric feature: VIF_i = 1 / (1 - R^2_i),
+    where R^2_i comes from actually regressing feature i on every other
+    numeric feature. VIF > 5 is the conventional multicollinearity flag."""
+    sub = df[numeric_cols].dropna()
+    results = []
+    if len(sub) < 5 or len(numeric_cols) < 2:
+        return results
+    for col in numeric_cols:
+        other_cols = [c for c in numeric_cols if c != col]
+        y = sub[col].to_numpy()
+        X_other = sub[other_cols].to_numpy()
+        reg = LinearRegression().fit(X_other, y)
+        r_squared = reg.score(X_other, y)
+        vif = None if r_squared >= 0.9999 else round(1.0 / (1.0 - r_squared), 3)
+        # vif=None means "effectively infinite" (near-perfect collinearity),
+        # which is the worst case, not an exemption from the high-risk flag.
+        results.append({
+            "feature": col,
+            "vif": vif,
+            "rSquared": round(float(r_squared), 4),
+            "highRisk": bool(vif is None or vif > 5),
+        })
+    return results
 
 
 def rank_by_cross_validation(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -882,3 +956,172 @@ def drift_metrics(request: DriftRequest):
             }
 
     return {"drift_status": drift_report}
+
+
+@app.post("/hypothesis-test")
+def run_hypothesis_test(request: HypothesisTestRequest):
+    """Runs a genuine statistical test between two real columns from the
+    actual dataset. The test type - Pearson correlation, Welch's t-test,
+    one-way ANOVA, or a chi-squared test of independence - is chosen
+    automatically from each column's real dtype and group cardinality, and
+    computed via scipy.stats. Never a placeholder or random value."""
+    if not request.data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+    if len(request.columns) != 2:
+        raise HTTPException(status_code=400, detail="Exactly two columns are required to test a relationship.")
+
+    df = pd.DataFrame(request.data)
+    col_a, col_b = request.columns
+    missing = [c for c in (col_a, col_b) if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Column(s) not found in data: {missing}")
+
+    sub = df[[col_a, col_b]].dropna()
+    if len(sub) < 4:
+        raise HTTPException(status_code=400, detail="Need at least 4 complete rows across both columns to run a test.")
+
+    a_numeric = pd.api.types.is_numeric_dtype(sub[col_a])
+    b_numeric = pd.api.types.is_numeric_dtype(sub[col_b])
+
+    if a_numeric and b_numeric:
+        stat, p_value = stats.pearsonr(sub[col_a], sub[col_b])
+        test_name = "Pearson Correlation"
+        basis = f"Pearson correlation between {col_a} and {col_b} across {len(sub)} rows."
+    elif a_numeric != b_numeric:
+        numeric_col, group_col = (col_a, col_b) if a_numeric else (col_b, col_a)
+        groups = [g.dropna().to_numpy() for _, g in sub.groupby(group_col)[numeric_col]]
+        groups = [g for g in groups if len(g) > 0]
+        if len(groups) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{group_col} needs at least 2 distinct groups with data to compare {numeric_col} across.",
+            )
+        if len(groups) == 2:
+            stat, p_value = stats.ttest_ind(groups[0], groups[1], equal_var=False)
+            test_name = "Two-Sample T-Test (Welch)"
+            basis = f"Welch's t-test comparing {numeric_col} across the 2 groups of {group_col} ({len(sub)} rows)."
+        else:
+            stat, p_value = stats.f_oneway(*groups)
+            test_name = "One-Way ANOVA"
+            basis = f"One-way ANOVA comparing {numeric_col} across {len(groups)} groups of {group_col} ({len(sub)} rows)."
+    else:
+        contingency = pd.crosstab(sub[col_a], sub[col_b])
+        if contingency.shape[0] < 2 or contingency.shape[1] < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Need at least 2 distinct categories in both {col_a} and {col_b} to run a chi-squared test.",
+            )
+        stat, p_value, dof, _ = stats.chi2_contingency(contingency)
+        test_name = "Chi-Squared Test of Independence"
+        basis = f"Chi-squared test of independence between {col_a} and {col_b} ({len(sub)} rows, {dof} degrees of freedom)."
+
+    p_value = float(p_value)
+    return {
+        "testName": test_name,
+        "testStatistic": round(float(stat), 4),
+        "pValue": round(p_value, 6),
+        "rejectNull": bool(p_value < 0.05),
+        "sampleSize": int(len(sub)),
+        "basis": basis,
+    }
+
+
+# --------------------------------------------------------------------------
+# Agentic analysis mode: a fixed, whitelisted set of real functions that an
+# LLM orchestration loop (server.ts) can call. Every one of these performs a
+# genuine computation - real preprocessing, a real model fit, or a real
+# regression-based statistic - and reuses the exact same training routine as
+# /train, so an agent-proposed retrain is held to the same standard as any
+# other model in this app. There is no path from here to arbitrary code
+# execution: only these three operations are reachable.
+# --------------------------------------------------------------------------
+
+@app.post("/agent/retrain-with-transform")
+def agent_retrain_with_transform(request: AgentRetrainTransformRequest):
+    if not request.data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+    if request.model_key not in VALID_MODEL_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown model_key '{request.model_key}'.")
+
+    df = pd.DataFrame(request.data)
+    if request.column not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Column '{request.column}' not found in data.")
+    if not pd.api.types.is_numeric_dtype(df[request.column]):
+        raise HTTPException(status_code=400, detail=f"Column '{request.column}' is not numeric; cannot apply a '{request.method}' transform.")
+
+    df[request.column] = apply_column_transform(df[request.column], request.method)
+
+    train_request = TrainRequest(
+        data=df.to_dict(orient="records"),
+        target=request.target,
+        features=request.features,
+        task_type=request.task_type,
+        models=[request.model_key],
+    )
+    train_response = train_model(train_request)
+    champion = train_response["champion"]
+
+    return {
+        "modelKey": champion["modelKey"],
+        "modelName": champion["modelName"],
+        "modelId": champion["modelId"],
+        "primaryMetric": champion["primaryMetric"],
+        "primaryMetricValue": champion["primaryMetricValue"],
+        "cv": champion.get("cv"),
+        "transformApplied": {"column": request.column, "method": request.method},
+        "targetWasTransformed": request.column == request.target,
+    }
+
+
+@app.post("/agent/drop-feature")
+def agent_drop_feature(request: AgentDropFeatureRequest):
+    if not request.data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+    if request.model_key not in VALID_MODEL_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown model_key '{request.model_key}'.")
+
+    df = pd.DataFrame(request.data)
+    base_features = request.features or [c for c in df.columns if c != request.target]
+    if request.drop_feature not in base_features:
+        raise HTTPException(status_code=400, detail=f"'{request.drop_feature}' is not a current feature.")
+    remaining_features = [f for f in base_features if f != request.drop_feature]
+    if not remaining_features:
+        raise HTTPException(status_code=400, detail="Cannot drop the only remaining feature.")
+
+    train_request = TrainRequest(
+        data=request.data,
+        target=request.target,
+        features=remaining_features,
+        task_type=request.task_type,
+        models=[request.model_key],
+    )
+    train_response = train_model(train_request)
+    champion = train_response["champion"]
+
+    return {
+        "modelKey": champion["modelKey"],
+        "modelName": champion["modelName"],
+        "modelId": champion["modelId"],
+        "primaryMetric": champion["primaryMetric"],
+        "primaryMetricValue": champion["primaryMetricValue"],
+        "cv": champion.get("cv"),
+        "droppedFeature": request.drop_feature,
+        "remainingFeatures": remaining_features,
+    }
+
+
+@app.post("/agent/check-multicollinearity")
+def agent_check_multicollinearity(request: AgentVifRequest):
+    if not request.data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+
+    df = pd.DataFrame(request.data)
+    numeric_features = [f for f in request.features if f in df.columns and pd.api.types.is_numeric_dtype(df[f])]
+    if len(numeric_features) < 2:
+        return {"vifScores": [], "highRiskFeatures": [], "note": "Fewer than 2 numeric features - multicollinearity is not applicable."}
+
+    vif_scores = compute_vif(df, numeric_features)
+    return {
+        "vifScores": vif_scores,
+        "highRiskFeatures": [v["feature"] for v in vif_scores if v["highRisk"]],
+    }

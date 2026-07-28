@@ -15,6 +15,9 @@ export default defineConfig({
   },
   server: {
     hmr: process.env.DISABLE_HMR !== 'true',
-    watch: process.env.DISABLE_HMR === 'true' ? null : {},
+    // deepakllm_training_data.jsonl is a runtime log the server appends to while
+    // the app is used, not source code - without this it triggers a disruptive
+    // full-page reload (and lost UI state) on every chat/training interaction.
+    watch: process.env.DISABLE_HMR === 'true' ? null : { ignored: ['**/deepakllm_training_data.jsonl'] },
   },
 });

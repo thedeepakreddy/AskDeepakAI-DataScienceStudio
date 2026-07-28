@@ -5,11 +5,19 @@
 
 ---
 
+## 🎯 The Problem
+
+Most "AutoML" side projects fall into one of two traps: an LLM narrates plausible-sounding metrics instead of computing them, or the "platform" is a thin wrapper around a single hardcoded `sklearn` call. Neither actually does machine learning, and neither survives a technical interviewer asking "wait, where does that number come from?"
+
+This project was rebuilt to close that gap. Every metric a user sees — accuracy, R², the cross-validation scores behind model selection, SHAP feature importances, KS-test drift statistics — is produced by a real Python microservice running real `scikit-learn` / `XGBoost` training and real `pandas` / `NumPy` analysis on the actual uploaded dataset. Google Gemini is deliberately confined to narration and UX (chat, plain-English summaries, code generation): its response schemas structurally omit numeric fields, so it is not just discouraged but *unable* to be the source of a number anyone could make a decision on. Where Gemini is unavailable, the app falls back to template narration built from those same real numbers rather than degrading silently.
+
+---
+
 ## ⏱️ 10-Second Recruiter Summary
 *   **What is it?** A Full-Stack Data Science, AI, and MLOps workstation that automates data ingestion, cleaning, EDA, and machine learning pipelines entirely in the browser.
 *   **The Big Innovation:** Features dual interfaces. **Beginner Mode** abstracts complex math away for business users, while **Expert Mode** unlocks production-grade MLOps configurations, ETL pipeline exports, and Python FastAPI integrations.
 *   **Tech Stack:** React (TypeScript, Vite, Tailwind, Recharts) frontend, Node.js/Express orchestration backend, Python (FastAPI, Scikit-learn, XGBoost) microservice, and Google Gemini API for semantic AI reasoning.
-*   **Key Features:** Visual SQL builder, zero-telemetry local CSV processing, data drift monitoring (KS-Tests), Hyperparameter tuning, and a 3D-orbiting intelligent Chatbot assistant.
+*   **Key Features:** An agentic analysis mode (Gemini function-calling a real reason → act → observe loop against the ML service), a visual SQL builder, zero-telemetry local CSV processing, data drift monitoring (KS-Tests), hyperparameter tuning, and a 3D-orbiting intelligent Chatbot assistant.
 
 ---
 
@@ -82,14 +90,15 @@ This application is engineered to meet strict industry standards for reliability
 ### Stage 3: Exploration (EDA & Hypotheses)
 *   **Semantic Data Profiling**: Connects to Google Gemini to interpret column name contexts, synthesize underlying business vectors, and deliver descriptive data commentary natively mapping back to your initial business goal.
 *   **Hypothesis Testing Lab**:
-    *   **Auto-Generate Deep Hypotheses**: Click the generator to let the AI search your data distributions and instantly write and test custom statistical hypotheses revealing hidden correlation patterns.
-    *   **Test Your Own Hypothesis**: Formulate your exact specific question in plain text (e.g., "Do customers with high tenure have lower churn rates?"). AskDeepakAI will automatically translate the text, execute the analysis over your data, and provide logical True/False metric validation.
+    *   **Auto-Generate Deep Hypotheses**: Click the generator and Gemini proposes testable business hypotheses with the real columns they involve, pre-wired to the same real statistical engine below.
+    *   **Test Your Own Hypothesis**: Write your question in plain text (e.g., "Do customers with high tenure have lower churn rates?"), pick the two real columns it's about, and AskDeepakAI runs a genuine statistical test between them — Pearson correlation, a Welch's t-test, one-way ANOVA, or a chi-squared test of independence, chosen automatically from the columns' real data types via `scipy.stats` — then has Gemini narrate what the real result means in plain English.
 
 ### Stage 4: Machine Learning Modeling (AutoML)
 *   **Feature Architect & Optimizer**: Easily review columns to tag high-importance predictive variables, set specific Target variables, or selectively uncheck noise variables. The AI acts as a co-pilot, pre-selecting optimal Target metrics.
 *   **Interactive Simulation Parameters**: Custom hyperparameters let you seamlessly tune tree structural constraints, Random Forest iterations, estimator depths, and custom Cross-Validation Testing ratios (Test Splits).
 *   **Algorithmic Benchmarking Outputs**: Depending on the target column class, the workspace auto-detects Regression or Classification algorithms natively. Generates visual scorecards of metrics including **R-squared ($R^2$)**, **Mean Squared Error (MSE)**, **Accuracy**, **Precision**, and **F1-Score**.
 *   **Model Explainer Visualizer**: Generates interactive global feature importance metrics in a horizontal visualization, illustrating how specific parameters shift the specific algorithmic logic weights.
+*   **Agentic Analysis Mode**: Gemini reasons over the champion model's real metrics and a real EDA summary, then executes real diagnostic/fix steps against the ML service — a genuine reason → act → observe loop using Gemini's function-calling API (never free-text command parsing), constrained to a fixed, whitelisted set of real functions (`retrain_with_transform`, `drop_feature`, `check_multicollinearity` via real VIF). Every step's before/after metric is real; the agent's `reasoning` text is the only LLM-authored part of a step and is never treated as a source of truth for a number. Capped at 5 steps, with an explicit stop reason shown (cap reached, plateaued, or the agent judged itself done) — never an opaque black box.
 
 ### Stage 5: Stakeholder Dashboard
 *   **Interactive Multi-Metric Slicers**: Fast segment slicer panels let you slice complex numerical properties or categorical states dynamically.
@@ -99,7 +108,7 @@ This application is engineered to meet strict industry standards for reliability
 ### Stage 6: Reports Hub
 *   **Data Dictionary Catalog**: Instantly renders out a well-typed data dictionary schema of the original and transformed feature mappings.
 *   **ETL Code Exporter**: Generates 1-to-1 reproducible native Python Pipeline code mimicking the precise data cleaning drops, imputations, and predictive states currently cached in your application.
-*   **Executive PDF Pipeline (Simulation Showcase)**: Prints a polished, structured narrative that frames the ML mechanics as an executive business case briefing.
+*   **Executive PDF Pipeline (Real-Data Business Briefing)**: Prints a polished, structured narrative — built from the actual dataset profile and real trained-model metrics, narrated by Gemini for a business audience — framing the ML mechanics as an executive business case briefing.
 
 ### 🤖 AskDeepakAI Chat & Interactive AssistiveTouch Bot
 The application features a revolutionary interactive **3D-rotating robot assistant** orbiting the user's workspace on all screen layouts globally.
@@ -147,6 +156,34 @@ The workstation follows a modern client-server architecture, acting as an enterp
 └─────────────────────────┘   └─────────────────────────────────────────┘
 ```
 
+This isn't just a diagram — it's backed by a [pytest suite](mlops_service/tests) that asserts real metric ranges and cross-checks EDA numbers against independent pandas computation, and a [CI workflow](.github/workflows/ci.yml) that runs it on every push.
+
+---
+
+## 🎬 Live Demo
+
+🔗 **Hosted demo:** not currently deployed — the fastest way to see it live is the [Docker one-liner](#-alternative-one-command-local-dev-with-docker) below (`docker compose up --build`, then open `localhost:3000`).
+
+The clip below is a real, unedited run captured directly against the running application (locally, via the Docker setup above) — a sample dataset going through server-side EDA, real 5-model AutoML training (Logistic Regression, Random Forest, Gradient Boosting, XGBoost, and an MLP, ranked by cross-validation, not just a single test-set score), and real SHAP feature importance for the winning model. Nothing shown is scripted or mocked.
+
+![Demo: real server-side EDA, multi-model AutoML comparison, and SHAP explainability](docs/screenshots/demo.gif)
+
+<details>
+<summary>Static screenshots</summary>
+
+**Real, server-side EDA** — pandas/NumPy statistics (mean, median, skew, IQR outliers, missing-value report, correlation matrix) computed on the actual uploaded data, with an AI-written summary that is structurally barred from inventing its own numbers:
+![Real server-side EDA](docs/screenshots/02-real-server-side-eda.png)
+
+**Real multi-model AutoML comparison** — five candidate models trained and ranked by 5-fold cross-validation mean (with fold-to-fold std shown, not hidden), including the losers, with an explicit, visible reason for why the champion was chosen:
+![Real AutoML model comparison](docs/screenshots/03-real-automl-model-comparison.png)
+
+**Real SHAP explainability** — feature importance for the champion model computed via SHAP (TreeExplainer / LinearExplainer depending on the algorithm), not a hardcoded or LLM-guessed ranking:
+![Real SHAP feature importance](docs/screenshots/04-real-shap-feature-importance.png)
+
+</details>
+
+📄 Curious what was actually hard to build (and what's still fake vs. real)? See **[CASE_STUDY.md](CASE_STUDY.md)**.
+
 ---
 
 ## 🛠️ Technology Stack
@@ -157,9 +194,17 @@ The workstation follows a modern client-server architecture, acting as an enterp
 | **Bundler / Build** | **Vite** | v6.x — Sub-millisecond dev starts with ES Module hot reloading |
 | **Styles** | **Tailwind CSS** | v4.x — High-fidelity utility classes & themes |
 | **Graphs & Charts** | **Recharts & Lucide** | Interactive visualizations, scatter plots, trend lines, SVG Icons |
-| **Server Engine** | **Node.js / Express** | Compact REST API wrapper and static web asset middleware |
-| **AI Processing** | **Google GenAI SDK** | `@google/genai` v2.4.x — Gemini model API integrations |
+| **Server Engine** | **Node.js / Express** | Compact REST API wrapper and static web asset middleware, proxies to the Python ML microservice |
+| **AI Processing** | **Google GenAI SDK** | `@google/genai` v2.4.x — Gemini API integrations. Narration-only outside agentic mode (see [The Problem](#-the-problem)); in agentic mode, Gemini only *triggers* real functions via structured function-calling — it never computes a metric itself |
+| **Agent Orchestration** | **Gemini function-calling** | `FunctionCallingConfigMode.ANY` against a fixed, whitelisted tool set — reason → act → observe loop, capped at 5 steps, never free-text command parsing |
 | **Server Compiler** | **esbuild** | Ultra-fast JS/TS server compiler bundling to standalone CommonJS |
+| **ML Microservice** | **FastAPI** | Python compute engine — the source of every real number in the app |
+| **Model Training** | **scikit-learn / XGBoost** | Real `Pipeline`s (imputation + scaling/encoding + estimator), 5 candidate models, k-fold cross-validation |
+| **Explainability** | **SHAP** | `TreeExplainer` / `LinearExplainer` per algorithm — real feature attribution, not a guessed ranking |
+| **Data Analysis** | **pandas / NumPy / SciPy** | Real EDA (correlation, skew, IQR outliers), KS-test drift detection, real VIF multicollinearity checks |
+| **Testing** | **pytest** | 39 tests: real metric-range assertions, EDA numbers cross-checked against independent pandas computation, agent function coverage |
+| **Lint / CI** | **ruff, tsc, GitHub Actions** | Lint + test + typecheck + build on every push — see the badge at the top of this README |
+| **Containerization** | **Docker / docker-compose** | One-command local dev for the full stack — see [Local Development Setup](#-local-development-setup) |
 
 ---
 

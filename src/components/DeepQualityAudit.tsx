@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Dataset } from '../types';
 import { Microscope, Loader2, AlertTriangle, Download, Code, ShieldCheck } from 'lucide-react';
+import { usePipelineContext } from '../contexts/PipelineContext';
 
 interface DeepQualityAuditProps {
   dataset: Dataset;
@@ -14,6 +15,7 @@ interface Issue {
 }
 
 export default function DeepQualityAudit({ dataset }: DeepQualityAuditProps) {
+  const { setHasRunAudit } = usePipelineContext();
   const [loading, setLoading] = useState(false);
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +73,7 @@ export default function DeepQualityAudit({ dataset }: DeepQualityAuditProps) {
       const data = await response.json();
       if (response.ok && data.fixes) {
         setIssues(data.fixes);
+        setHasRunAudit(true);
       } else {
         setError(data.error || 'Failed to process quality audit.');
       }

@@ -22,13 +22,15 @@ export default function HypothesisLab({ dataset }: HypothesisLabProps) {
   const [testResults, setTestResults] = useState<Record<number, any>>({});
   const [interpretations, setInterpretations] = useState<Record<number, string>>({});
   const [customHypothesisText, setCustomHypothesisText] = useState('');
+  const [customColA, setCustomColA] = useState(dataset.columns[0]?.name || '');
+  const [customColB, setCustomColB] = useState(dataset.columns[1]?.name || dataset.columns[0]?.name || '');
 
   const handleRunCustomTest = () => {
-    if (!customHypothesisText.trim()) return;
+    if (!customHypothesisText.trim() || !customColA || !customColB) return;
     const newHypothesis: Hypothesis = {
       statement: customHypothesisText,
-      suggestedTest: 'Custom AI Test',
-      columnsInvolved: ['Auto-detected']
+      suggestedTest: 'Custom (columns picked below)',
+      columnsInvolved: [customColA, customColB]
     };
     
     const nextIdx = hypotheses ? hypotheses.length : 0;
@@ -65,24 +67,49 @@ export default function HypothesisLab({ dataset }: HypothesisLabProps) {
 
   const runTest = async (idx: number, hypothesis: Hypothesis) => {
      setTestingHypothesisIdx(idx);
-     
-     // Very basic mock heuristic logic for in-browser stats since we can't use mathjs
-     // This just calculates basic local stat simulation based on columns if possible
-     const cols = hypothesis.columnsInvolved;
-     let pValue = Math.random() * 0.2; // Simulated P-Value
-     let testStatistic = (Math.random() * 10).toFixed(2);
-     let sig = pValue < 0.05;
 
-     const result = {
-       testStatistic,
-       pValue: pValue.toFixed(4),
-       rejectNull: sig,
-       message: sig ? 'Statistically Significant Difference Found' : 'No Significant Difference'
-     };
+     // Real test: pick the first 2 columns from the hypothesis that actually
+     // exist in this dataset (an AI-generated hypothesis could name more than
+     // 2, or hallucinate one that doesn't exist) and send the real rows to
+     // the ML service, which chooses and runs a genuine scipy.stats test
+     // (correlation / t-test / ANOVA / chi-squared) based on real column
+     // dtypes - never a random or guessed number.
+     const testColumns = hypothesis.columnsInvolved.filter(c => dataset.columns.some(col => col.name === c)).slice(0, 2);
 
-     setTestResults(prev => ({ ...prev, [idx]: result }));
+     if (testColumns.length < 2) {
+       setTestResults(prev => ({ ...prev, [idx]: {
+         error: true,
+         message: 'Could not identify two real columns in your dataset to test this hypothesis against.'
+       } }));
+       setTestingHypothesisIdx(null);
+       return;
+     }
 
-     // Feed results back to interpret
+     let result: any;
+     try {
+       const resp = await fetch('/api/hypothesis-lab/run-test', {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({ data: dataset.rows, columns: testColumns })
+       });
+       const data = await resp.json();
+       if (!resp.ok) {
+         throw new Error(data.error || `Server responded with ${resp.status}`);
+       }
+       result = data;
+       setTestResults(prev => ({ ...prev, [idx]: result }));
+     } catch (err: any) {
+       console.error('Hypothesis test failed', err);
+       setTestResults(prev => ({ ...prev, [idx]: {
+         error: true,
+         message: err.message || 'Real statistical test failed - is the ML compute service running?'
+       } }));
+       setTestingHypothesisIdx(null);
+       return;
+     }
+
+     // Feed the real result back to interpret (narration only - the numbers
+     // above already came from the real test, this just explains them).
      try {
        const resp = await fetch('/api/hypothesis-lab/interpret', {
          method: 'POST',
@@ -138,20 +165,34 @@ export default function HypothesisLab({ dataset }: HypothesisLabProps) {
           {/* Custom Side */}
           <div className="flex-[1.5] bg-slate-950/50 p-6 rounded-xl border border-slate-800 flex flex-col justify-center">
             <h4 className="font-bold text-white text-sm mb-2">Test Your Own Hypothesis</h4>
-            <p className="text-xs text-slate-400 mb-4">Have a specific question in mind? Enter your hypothesis below and we'll test it against your dataset instantly.</p>
+            <p className="text-xs text-slate-400 mb-4">Have a specific question in mind? Write it down, pick the two real columns it's about, and we'll run a genuine statistical test between them.</p>
+            <input
+              type="text"
+              value={customHypothesisText}
+              onChange={(e) => setCustomHypothesisText(e.target.value)}
+              placeholder="e.g. Higher tenure implies lower churn..."
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all mb-3"
+              onKeyDown={(e) => { if (e.key === 'Enter') handleRunCustomTest(); }}
+            />
             <div className="flex flex-col sm:flex-row gap-3">
-               <input
-                 type="text"
-                 value={customHypothesisText}
-                 onChange={(e) => setCustomHypothesisText(e.target.value)}
-                 placeholder="e.g. Higher tenure implies lower churn..."
-                 className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
-                 onKeyDown={(e) => { if (e.key === 'Enter') handleRunCustomTest(); }}
-               />
+               <select
+                 value={customColA}
+                 onChange={(e) => setCustomColA(e.target.value)}
+                 className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+               >
+                 {dataset.columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+               </select>
+               <select
+                 value={customColB}
+                 onChange={(e) => setCustomColB(e.target.value)}
+                 className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+               >
+                 {dataset.columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+               </select>
                <button
                  onClick={handleRunCustomTest}
-                 disabled={!customHypothesisText.trim() || testingHypothesisIdx !== null}
-                 className="bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 disabled:text-slate-500 text-white font-bold py-3 px-6 rounded-xl transition-all text-sm flex items-center justify-center gap-2 shrink-0"
+                 disabled={!customHypothesisText.trim() || !customColA || !customColB || testingHypothesisIdx !== null}
+                 className="bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 disabled:text-slate-500 text-white font-bold py-2.5 px-6 rounded-xl transition-all text-sm flex items-center justify-center gap-2 shrink-0"
                >
                  <Play className="w-4 h-4" /> Test It
                </button>
@@ -181,11 +222,18 @@ export default function HypothesisLab({ dataset }: HypothesisLabProps) {
                    {testingHypothesisIdx === idx ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                    {testingHypothesisIdx === idx ? 'Running Test...' : 'Run This Test'}
                  </button>
+               ) : testResults[idx].error ? (
+                 <div className="bg-rose-500/10 border border-rose-500/20 p-3 rounded-lg flex items-start gap-2">
+                   <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                   <p className="text-xs text-rose-300">{testResults[idx].message}</p>
+                 </div>
                ) : (
                  <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
+                    <div className="text-[10px] text-slate-500 font-mono mb-2 uppercase tracking-wide">Real test run: {testResults[idx].testName}</div>
                     <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
-                       <span className="text-xs text-slate-400 font-mono">p-value: <strong className={testResults[idx].rejectNull ? 'text-emerald-400' : 'text-rose-400'}>{testResults[idx].pValue}</strong></span>
+                       <span className="text-xs text-slate-400 font-mono">p-value: <strong className={testResults[idx].rejectNull ? 'text-emerald-400' : 'text-rose-400'}>{testResults[idx].pValue.toFixed(4)}</strong></span>
                        <span className="text-xs text-slate-400 font-mono">Statistic: <strong>{testResults[idx].testStatistic}</strong></span>
+                       <span className="text-xs text-slate-400 font-mono">n = <strong>{testResults[idx].sampleSize}</strong></span>
                     </div>
                     {interpretations[idx] ? (
                        <p className="text-sm text-slate-300 leading-relaxed">{interpretations[idx]}</p>

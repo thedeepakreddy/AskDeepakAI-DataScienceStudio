@@ -25,7 +25,8 @@ import {
   ShieldCheck,
   ShieldAlert,
   Trophy,
-  Loader2
+  Loader2,
+  Bot
 } from 'lucide-react';
 import {
   BarChart,
@@ -52,6 +53,7 @@ import {
 } from '../utils/mlEngine';
 import ModelExplainer from './ModelExplainer';
 import MLOpsDashboard from './MLOpsDashboard';
+import AgentAnalysis from './AgentAnalysis';
 import { usePipelineContext } from '../contexts/PipelineContext';
 
 interface MLPipelineProps {
@@ -103,7 +105,7 @@ export default function MLPipeline({
   const [downloadingModel, setDownloadingModel] = useState<boolean>(false);
 
   // Tabs management
-  const [activeRealm, setActiveRealm] = useState<'supervised' | 'unsupervised' | 'ensemble' | 'deep_learning' | 'comparison'>('supervised');
+  const [activeRealm, setActiveRealm] = useState<'supervised' | 'unsupervised' | 'ensemble' | 'deep_learning' | 'comparison' | 'agent'>('supervised');
   const [selectedEstimatorIdx, setSelectedEstimatorIdx] = useState<number>(0);
   const [selectedRawPredPage, setSelectedRawPredPage] = useState<number>(1);
 
@@ -895,6 +897,15 @@ export default function MLPipeline({
                 >
                   <Trophy className="w-3.5 h-3.5 inline mr-1" /> Model Comparison
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveRealm('agent')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-colors tracking-tight ${
+                    activeRealm === 'agent' ? 'bg-indigo-600 text-white' : 'text-slate-400 bg-slate-950/40 hover:text-white'
+                  }`}
+                >
+                  <Bot className="w-3.5 h-3.5 inline mr-1" /> Agentic Analysis
+                </button>
               </div>
             </div>
 
@@ -1488,6 +1499,24 @@ export default function MLPipeline({
                   </div>
                 </div>
               </div>
+            )}
+
+            {/* REALM F: AGENTIC ANALYSIS — reason -> act -> observe loop against real ml-service functions */}
+            {activeRealm === 'agent' && (
+              mlResult.comparison && mlResult.comparison[0] ? (
+                <AgentAnalysis
+                  dataset={dataset}
+                  target={target}
+                  features={selectedFeatures}
+                  championModelKey={mlResult.comparison[0].modelKey}
+                  primaryMetric={mlResult.comparison[0].primaryMetric}
+                  primaryMetricValue={mlResult.comparison[0].metricValue}
+                />
+              ) : (
+                <div className="p-6 text-center bg-slate-950/50 border border-slate-850 rounded-xl text-[11px] text-slate-400">
+                  Train a model first to unlock agentic analysis.
+                </div>
+              )
             )}
 
             {/* MODEL EXPLAINER MODULE — narrates the real feature importances above */}

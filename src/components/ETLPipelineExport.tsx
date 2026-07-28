@@ -1,29 +1,30 @@
 import React, { useState } from 'react';
 import { Download, Terminal, Loader2, Workflow, AlertCircle } from 'lucide-react';
+import { usePipelineContext } from '../contexts/PipelineContext';
+import { describeCleaningOperation } from '../utils/cleaningOperations';
+import { CleaningOperation } from '../types';
 
 export default function ETLPipelineExport() {
+  const { cleaningSteps } = usePipelineContext();
   const [loading, setLoading] = useState(false);
   const [script, setScript] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const realTransformations = (cleaningSteps as CleaningOperation[]).map(describeCleaningOperation);
+
   const generateScript = async () => {
      setLoading(true);
      setError(null);
-     
-     // Mocking some transformations since we didn't lift state up globally yet
-     const simulatedTransformations = [
-        "Dropped columns: ['ID', 'Unnamed: 0']",
-        "Filled missing values in 'Age' with median",
-        "Filled missing values in 'Salary' with mean",
-        "Converted 'Date' to datetime64",
-        "Filtered rows where 'Age' > 18"
-     ];
 
      try {
        const response = await fetch('/api/etl-script-generator', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
-         body: JSON.stringify({ transformations: simulatedTransformations })
+         body: JSON.stringify({
+           transformations: realTransformations.length > 0
+             ? realTransformations
+             : ['No cleaning operations were applied in Cleaning Studio for this dataset.']
+         })
        });
        
        const data = await response.json();
@@ -71,6 +72,21 @@ export default function ETLPipelineExport() {
              </button>
           )}
        </div>
+
+       {!script && !loading && (
+         <div className="mb-6 text-xs text-slate-400 bg-slate-950/50 border border-slate-800 rounded-xl p-4">
+           {realTransformations.length > 0 ? (
+             <>
+               <p className="font-bold text-slate-300 mb-2">Real operations that will be encoded into this script ({realTransformations.length}):</p>
+               <ul className="space-y-1 list-disc list-inside">
+                 {realTransformations.map((t, i) => <li key={i}>{t}</li>)}
+               </ul>
+             </>
+           ) : (
+             <p>No cleaning operations have been applied yet in Cleaning Studio — the exported script will reflect that honestly rather than invent steps you didn't take.</p>
+           )}
+         </div>
+       )}
 
        {loading && (
           <div className="py-8 flex flex-col items-center justify-center">

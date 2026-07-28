@@ -47,7 +47,7 @@ import LoadingScreen from './components/LoadingScreen';
 
 export default function App() {
   const [showLoading, setShowLoading] = useState(true);
-  const { businessProblem, bannerDismissed, setBannerDismissed, expertMode, setExpertMode } = usePipelineContext();
+  const { businessProblem, bannerDismissed, setBannerDismissed, expertMode, setExpertMode, setHasRunEda } = usePipelineContext();
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     if (typeof window !== 'undefined') {
       const storedTheme = localStorage.getItem('theme');
@@ -192,6 +192,7 @@ export default function App() {
       }
 
       setAiAnalysis(parsed);
+      setHasRunEda(true);
     } catch (err: any) {
       console.error(err);
       setErrorLine('AI exploratory analysis failed: ' + (err.message || 'Check model keys.'));

@@ -3,11 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Trash2, RefreshCw, Layers, CheckCircle, Flame, Plus, AlertCircle, Sparkles, Database, FileText, Settings2, BrainCircuit } from 'lucide-react';
 import { Dataset, CleaningOperation, DatasetColumn } from '../types';
 import DeepQualityAudit from './DeepQualityAudit';
 import { usePipelineContext } from '../contexts/PipelineContext';
+import { describeCleaningOperation } from '../utils/cleaningOperations';
 
 interface DataCleaningProps {
   dataset: Dataset;
@@ -16,11 +17,18 @@ interface DataCleaningProps {
 }
 
 export default function DataCleaning({ dataset, onUpdateDataset, onResetOriginal }: DataCleaningProps) {
-  const { expertMode } = usePipelineContext();
+  const { expertMode, setCleaningSteps } = usePipelineContext();
   const [selectedCol, setSelectedCol] = useState(dataset.columns[0]?.name || '');
   const [imputeStrategy, setImputeStrategy] = useState<'mean' | 'median' | 'zero' | 'mode'>('mean');
   const [operations, setOperations] = useState<CleaningOperation[]>([]);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Mirror the real, locally-tracked operations into shared context so other
+  // stages (e.g. the ETL Code Exporter in Reports) can reference what was
+  // actually done to this dataset, instead of guessing or hardcoding it.
+  useEffect(() => {
+    setCleaningSteps(operations);
+  }, [operations, setCleaningSteps]);
 
   // States for Adding Column
   const [newColName, setNewColName] = useState('');
@@ -958,14 +966,7 @@ export default function DataCleaning({ dataset, onUpdateDataset, onResetOriginal
               {operations.map((op, i) => (
                 <div key={op.id} className="bg-emerald-505/10 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 py-1.5 px-3 rounded-xl font-bold flex items-center gap-1.5 shadow-sm">
                   <span className="text-emerald-500">Step {i+1}:</span>
-                  <span className="text-slate-300 font-medium">
-                    {op.type === 'drop_column' ? `Dropped column "${op.column}"` : 
-                     op.type === 'type_convert' ? 
-                       (op.params.action === 'onehot' ? `One-Hot Encoded "${op.column}" into ${op.params.newColumns?.length} columns` :
-                        op.params.action ? `Generated "${op.params.newColumn}" via ${op.params.action} on "${op.column}"` :
-                        `Converted column "${op.column}"`) : 
-                     `Imputed "${op.column}" using ${op.params.strategy}`}
-                  </span>
+                  <span className="text-slate-300 font-medium">{describeCleaningOperation(op)}</span>
                 </div>
               ))}
             </div>
