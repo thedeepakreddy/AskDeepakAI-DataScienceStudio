@@ -1,11 +1,11 @@
-# 🧠 AskDeepakAI - Data Scientist Agent
+#  AskDeepakAI - Data Scientist Agent
 [![CI](https://github.com/thedeepakreddy/AskDeepakAI-DataScientist/actions/workflows/ci.yml/badge.svg)](https://github.com/thedeepakreddy/AskDeepakAI-DataScientist/actions/workflows/ci.yml)
 
 > Interactive, telemetry-free Data Science Workstation & Automated Machine Learning modeling engine powered by Google Gemini.
 
 ---
 
-## 🎯 The Problem
+##  The Problem
 
 Most "AutoML" side projects fall into one of two traps: an LLM narrates plausible-sounding metrics instead of computing them, or the "platform" is a thin wrapper around a single hardcoded `sklearn` call. Neither actually does machine learning, and neither survives a technical interviewer asking "wait, where does that number come from?"
 
@@ -13,7 +13,7 @@ This project was rebuilt to close that gap. Every metric a user sees — accurac
 
 ---
 
-## ⏱️ 10-Second Recruiter Summary
+##  10-Second Recruiter Summary
 *   **What is it?** A Full-Stack Data Science, AI, and MLOps workstation that automates data ingestion, cleaning, EDA, and machine learning pipelines entirely in the browser.
 *   **The Big Innovation:** Features dual interfaces. **Beginner Mode** abstracts complex math away for business users, while **Expert Mode** unlocks production-grade MLOps configurations, ETL pipeline exports, and Python FastAPI integrations.
 *   **Tech Stack:** React (TypeScript, Vite, Tailwind, Recharts) frontend, Node.js/Express orchestration backend, Python (FastAPI, Scikit-learn, XGBoost) microservice, and Google Gemini API for semantic AI reasoning.
@@ -21,7 +21,7 @@ This project was rebuilt to close that gap. Every metric a user sees — accurac
 
 ---
 
-## 📖 In-Depth Overview
+##  In-Depth Overview
 
 **AskDeepakAI Data Scientist** is an end-to-end full-stack data intelligence platform empowering data engineers, analysts, and business decision-makers to transform raw datasets into clean, analyzed, modeled, and stakeholder-ready resources. 
 
@@ -29,18 +29,18 @@ Unlike locked-down SaaS BI tools or heavy CLI-only Python environments, this pro
 
 ---
 
-## 🎭 Two Experiences: Beginner vs. Expert Mode
+##  Two Experiences: Beginner vs. Expert Mode
 
 The platform is dynamically architected to serve two entirely different user personas at the toggle of a switch in the header:
 
-### 🟢 Beginner Mode (Streamlined for Business)
+### Beginner Mode (Streamlined for Business)
 Designed for Product Managers, Students, and Business Analysts who need quick insights without getting bogged down by statistical jargon or code.
 *   **Simplified Ingestion:** Focuses purely on easy drag-and-drop local CSV uploads.
 *   **Automated Cleaning & EDA:** The AI acts as your pilot, automatically detecting schema issues, suggesting a business hypothesis, and displaying only top-level data health summaries.
 *   **One-Click Auto-ML:** Train AI models with a single click. Complex parameters are hidden. Outputs are presented in simple "Good/Bad" business terms (e.g., plain English accuracy summaries).
 *   **Basic Dashboarding:** The MLOps dashboard displays simple, reassuring green/red badges indicating whether data health is "Stable" or "Drifted", hiding the complex mathematics behind the scenes.
 
-### 🔴 Expert Mode (Unrestricted MLOps & Data Engineering)
+### Expert Mode (Unrestricted MLOps & Data Engineering)
 Unlocks the true power of the platform. Designed for Senior Data Scientists and ML Engineers who demand total control over their algorithms and data pipelines.
 *   **Database Syncs & SQL:** Unlocks the Visual Pipeline Builder allowing direct connection to PostgreSQL and Snowflake databases via scheduled `node-cron` jobs, plus an interactive SQL Assistant for querying.
 *   **Advanced Analytics Labs:** Unlocks the Hypothesis Lab, A/B Testing Interpreters, Feature Correlation Matrix, and multi-dimensional Distribution Charts.
@@ -50,7 +50,7 @@ Unlocks the true power of the platform. Designed for Senior Data Scientists and 
 
 ---
 
-## 🏢 Industry-Grade Architecture & Enterprise Readiness
+##  Industry-Grade Architecture & Enterprise Readiness
 
 This application is engineered to meet strict industry standards for reliability, security, and scalability:
 
@@ -61,7 +61,7 @@ This application is engineered to meet strict industry standards for reliability
 
 ---
 
-## 🛡️ Comprehensive Feature Breakdown
+##  Comprehensive Feature Breakdown
 
 ### Data Engineering (Automated Ingestion & Sync)
 *   **External Database Connectors**: Integrates securely with Snowflake, PostgreSQL, and other cloud databases for automated data pooling.
@@ -117,7 +117,7 @@ The application features a revolutionary interactive **3D-rotating robot assista
 *   **Run Python / JS Scripts**: Directly issue code block commands through the input field to alter the current row mappings with your custom developer logic.
 *   **3D Quantum Orbit Design**: The hovering bot incorporates multi-layered reflective graphics with active orbital ring visuals, responsive viewport-edge snapping physics, and simple interactive drag.
 
-### 🌐 Workspace Adaptability & UX
+### Workspace Adaptability & UX
 *   **Beginner vs. Expert User Context Toggle**: Switch seamlessly from 'Beginner' to 'Expert' modes right from the header. This dynamically switches the complexity of visual data! In "Beginner mode", the MLOps dashboard shows simple green/red badge indicators for data drift health. In "Expert Mode", it reveals complex Recharts line charts and statistical distribution metrics (KS-Tests).
 *   **Intelligent Stage Headers**: Contextually aware top-headers that provide a clear mission statement and description for every individual stage, anchoring the user on the specific task.
 *   **Advanced Dynamic Pipeline Progression (Stage Navigation)**: A powerful left-centered sticky navigation pill and bottom page navigation footers that collapse neatly out of the way, tracing locked statuses, completed dependencies, and transitioning elegantly fluidly up and down the data transformation chain without complex paginations.
@@ -126,7 +126,7 @@ The application features a revolutionary interactive **3D-rotating robot assista
 
 ---
 
-## 📐 System Architecture Flow
+## System Architecture Flow
 
 The workstation follows a modern client-server architecture, acting as an enterprise MLOps platform:
 
@@ -160,7 +160,7 @@ This isn't just a diagram — it's backed by a [pytest suite](mlops_service/test
 
 ---
 
-## 🎬 Live Demo
+## Live Demo
 
 🔗 **Hosted demo:** not currently deployed — the fastest way to see it live is the [Docker one-liner](#-alternative-one-command-local-dev-with-docker) below (`docker compose up --build`, then open `localhost:3000`).
 
@@ -182,11 +182,11 @@ The clip below is a real, unedited run captured directly against the running app
 
 </details>
 
-📄 Curious what was actually hard to build (and what's still fake vs. real)? See **[CASE_STUDY.md](CASE_STUDY.md)**.
+ Curious what was actually hard to build (and what's still fake vs. real)? See **[CASE_STUDY.md](CASE_STUDY.md)**.
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 | Component | Technology | Version / Focus |
 | :--- | :--- | :--- |
@@ -208,7 +208,7 @@ The clip below is a real, unedited run captured directly against the running app
 
 ---
 
-## 🚀 Local Development Setup
+##  Local Development Setup
 
 To test, debug, or run the application on your computer:
 
@@ -255,7 +255,7 @@ To test, debug, or run the application on your computer:
     ```
     *   This boots up the Native Compute Engine for the 1-Click Deploy endpoints.
 
-### 🐳 Alternative: One-Command Local Dev with Docker
+###  Alternative: One-Command Local Dev with Docker
 
 If you have Docker installed, you can skip steps 2, 4, and 5 above and run the whole stack (frontend/orchestrator + Python ML microservice) with a single command:
 
@@ -269,7 +269,7 @@ GEMINI_API_KEY=your_actual_google_gemini_api_key_here docker compose up --build
 
 ---
 
-## 🌐 Deploying to Render.com (Production)
+##  Deploying to Render.com (Production)
 
 > **Architectural Note**: Python apps use Streamlit; full-stack TypeScript apps require standard virtual runtimes. Because **AskDeepakAI** is designed using TypeScript, Node, and React, **Render Web Services** is the perfect hosting environment.
 
@@ -301,7 +301,7 @@ Render will automatically pull the branch, compile your React application bundle
 
 ---
 
-## 🗂️ Git Directory Structure (For GitHub & Render Deployment)
+##  Git Directory Structure (For GitHub & Render Deployment)
 
 To deploy cleanly on Render, your GitHub repository should contain the following structure. 
 
@@ -309,27 +309,27 @@ To deploy cleanly on Render, your GitHub repository should contain the following
 
 ```text
 AskDeepakAI-DataScientist/
-├── .gitignore            <-- ✅ Ignores dist/ and node_modules/
-├── .env.example          <-- ✅ Example Template (Commit safely)
-├── package.json          <-- ✅ Packages & Render Build/Start Scripts
-├── package-lock.json     <-- ✅ Locks dependency versions for Render
-├── tsconfig.json         <-- ✅ TypeScript Configuration
-├── vite.config.ts        <-- ✅ Vite & Tailwind v4 plugin config
-├── server.ts             <-- ✅ Express NodeJS entrypoint wrapper
-├── mlops_service/        <-- ✅ Native Python FastAPI compute engine
+├── .gitignore            <--  Ignores dist/ and node_modules/
+├── .env.example          <--  Example Template (Commit safely)
+├── package.json          <--  Packages & Render Build/Start Scripts
+├── package-lock.json     <--  Locks dependency versions for Render
+├── tsconfig.json         <--  TypeScript Configuration
+├── vite.config.ts        <--  Vite & Tailwind v4 plugin config
+├── server.ts             <--  Express NodeJS entrypoint wrapper
+├── mlops_service/        <--  Native Python FastAPI compute engine
 │   ├── main.py
 │   └── requirements.txt
-└── src/                  <-- ✅ UI React Pages, Styles, and Data Components
+└── src/                  <--  UI React Pages, Styles, and Data Components
     ├── index.css         <-- Contains Tailwind v4 @theme directives
     ├── App.tsx 
     └── components/
 
-## 🚫 Files to IGNORE in GitHub (Add to .gitignore)
-├── .env                  <-- ❌ SECRETS (Never commit your Gemini API Key)
-├── node_modules/         <-- ❌ Heavy folder, let Render run 'npm install'
-└── dist/                 <-- ❌ Compiled folder, let Render run 'npm run build'
+##  Files to IGNORE in GitHub (Add to .gitignore)
+├── .env                  <--  SECRETS (Never commit your Gemini API Key)
+├── node_modules/         <--  Heavy folder, let Render run 'npm install'
+└── dist/                 <--  Compiled folder, let Render run 'npm run build'
 ```
 
 ---
 
-*Engineered with precision. Powered by Google Gemini.*
+*Engineered by Deepak with precision. Powered by Google Gemini.*
