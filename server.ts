@@ -331,10 +331,12 @@ app.post('/api/run-ml-prediction', async (req, res) => {
     return res.status(400).json({ error: 'No dataset rows were provided. Upload and select a dataset before training.' });
   }
 
-  const REAL_MODEL_KEYS = ['linear', 'random_forest', 'xgboost', 'mlp'];
+  // 'auto' omits `models` entirely so the Python service's own DEFAULT_MODELS
+  // (5 real candidates) is the single source of truth for the AutoML set.
+  const REAL_MODEL_KEYS = ['linear', 'random_forest', 'gradient_boosting', 'xgboost', 'mlp'];
   const requestedAlgo = safeHyperparameters.selectedAlgorithmId || 'auto';
   const models = requestedAlgo === 'auto'
-    ? ['linear', 'random_forest', 'xgboost']
+    ? undefined
     : (REAL_MODEL_KEYS.includes(requestedAlgo) ? [requestedAlgo] : ['random_forest']);
 
   const trainRatio = typeof safeHyperparameters.train_ratio === 'number' ? safeHyperparameters.train_ratio : 0.8;
@@ -378,9 +380,11 @@ app.post('/api/run-ml-prediction', async (req, res) => {
     metrics: champion.metrics,
     confusionMatrix: champion.confusionMatrix,
     featureImportance: champion.featureImportance,
+    shapImportance: champion.shapImportance,
     predictions: champion.predictions,
     cv: champion.cv,
     comparison: trainResult.comparison,
+    selectionReason: trainResult.selectionReason,
     estimators: champion.estimators,
     oobScore: champion.oobScore,
     deepLearning: champion.deepLearning,
@@ -477,6 +481,100 @@ Feature Variables: ${JSON.stringify(safeFeatures)}`;
   } catch (apiError: any) {
     console.error('[AskDeepakAI Gemini Client] Narrative generation failed, using template narrative built from real metrics:', apiError);
     return res.json({ ...baseResult, ...buildTemplateNarrative(baseResult, safeTarget, safeFeatures) });
+  }
+});
+
+// 2b. REAL SERVER-SIDE EDA — correlation, skew, IQR outliers, and missing-value
+// report are all computed by pandas/numpy in the Python service. Gemini is
+// invoked ONLY afterward to narrate these real numbers, under the identical
+// no-invented-numbers rule as the ML training endpoint above: its response
+// schema carries no numeric fields, so it cannot report a statistic that
+// wasn't actually computed.
+app.post('/api/eda', async (req, res) => {
+  const { datasetRows } = req.body || {};
+  const rows = Array.isArray(datasetRows) ? datasetRows : [];
+
+  if (rows.length === 0) {
+    return res.status(400).json({ error: 'No dataset rows were provided.' });
+  }
+
+  let edaResult: any;
+  try {
+    edaResult = await callMlService('/eda', { body: { data: rows } });
+  } catch (err: any) {
+    console.error('[AskDeepakAI EDA] Real EDA computation failed:', err);
+    return res.status(503).json({
+      error: err.message || 'The EDA compute service is unavailable, so no analysis was run.',
+      hint: 'Start the Python service: cd mlops_service && pip install -r requirements.txt && uvicorn main:app --reload --port 8000'
+    });
+  }
+
+  const client = getGeminiClient();
+  const hasKey = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'DUMMY_KEY_FALLBACK';
+
+  if (!hasKey) {
+    console.log('[AskDeepakAI EDA] No API key detected. Using a template narrative built from the real EDA numbers above.');
+    return res.json({ ...edaResult, narrative: buildEdaTemplateNarrative(edaResult) });
+  }
+
+  try {
+    const realEdaJson = JSON.stringify({
+      rowCount: edaResult.rowCount,
+      columnCount: edaResult.columnCount,
+      numericSummaries: edaResult.numericSummaries,
+      outliers: (edaResult.outliers || []).map((o: any) => ({
+        column: o.column, outlierCount: o.outlierCount, outlierPercent: o.outlierPercent,
+        lowerBound: o.lowerBound, upperBound: o.upperBound
+      })),
+      correlation: edaResult.correlation,
+      missingReport: edaResult.missingReport,
+      categoricalSummaries: edaResult.categoricalSummaries
+    });
+
+    const systemInstruction = `You are a Data Quality Analyst summarizing a REAL exploratory data analysis that has ALREADY been computed by pandas/numpy. You will be given REAL_EDA — every mean, median, std, skew, correlation, and outlier count in it was genuinely measured from the dataset.
+
+STRICT RULES (violating these is a critical failure):
+1. Do NOT invent, recompute, guess, or restate with different precision any numeric value. Every number you write must be copied verbatim from REAL_EDA.
+2. Do NOT output numeric fields yourself. Your only output is narrative text: summary, dataQualityFlags, and recommendedNextSteps.
+3. If you want to reference a number not present in REAL_EDA, describe it qualitatively instead (e.g. "moderately skewed") rather than fabricate a figure.
+4. Focus on: what the skew/outliers/correlations/missing values mean for data quality, and what a data scientist should investigate or clean first.
+
+REAL_EDA:
+${realEdaJson}`;
+
+    const aiResponse = await generateContentWithRetry(client, {
+      contents: 'Summarize this real, already-computed exploratory data analysis in plain business language for a data scientist. Reference numbers only from REAL_EDA.',
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ['summary', 'dataQualityFlags', 'recommendedNextSteps'],
+          properties: {
+            summary: { type: Type.STRING, description: 'Plain-language narrative. Any number cited must appear verbatim in REAL_EDA.' },
+            dataQualityFlags: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: ['column', 'issue', 'severity'],
+                properties: {
+                  column: { type: Type.STRING },
+                  issue: { type: Type.STRING },
+                  severity: { type: Type.STRING, description: 'Must be "High", "Medium", or "Low"' }
+                }
+              }
+            },
+            recommendedNextSteps: { type: Type.ARRAY, items: { type: Type.STRING } }
+          }
+        }
+      }
+    });
+
+    const narrative = JSON.parse(aiResponse.text || '{}');
+    return res.json({ ...edaResult, narrative });
+  } catch (apiError: any) {
+    console.error('[AskDeepakAI EDA] Narrative generation failed, using template narrative built from real numbers:', apiError);
+    return res.json({ ...edaResult, narrative: buildEdaTemplateNarrative(edaResult) });
   }
 });
 
@@ -1625,4 +1723,45 @@ _These numbers come directly from a scikit-learn/XGBoost model trained and evalu
       ]
     }
   };
+}
+
+// Truthful, non-AI narrative for the real EDA endpoint — used only when
+// GEMINI_API_KEY isn't configured or the interpretation call fails. Every
+// figure it cites is read straight out of edaResult (the real pandas/numpy
+// computation), nothing here is invented.
+function buildEdaTemplateNarrative(edaResult: any) {
+  const missingReport = edaResult.missingReport || [];
+  const numericSummaries = edaResult.numericSummaries || [];
+  const outliers = edaResult.outliers || [];
+
+  const highMissing = missingReport.filter((m: any) => m.missingPercent > 20);
+  const highSkew = numericSummaries.filter((s: any) => Math.abs(s.skew) > 1);
+  const withOutliers = outliers.filter((o: any) => o.outlierCount > 0);
+
+  const summary = `Real EDA scan of ${edaResult.rowCount} rows across ${edaResult.columnCount} columns. ` +
+    `${highMissing.length} column(s) exceed 20% missing values. ` +
+    `${highSkew.length} numeric column(s) show skew beyond ±1. ` +
+    `${withOutliers.length} numeric column(s) have IQR-flagged outliers. ` +
+    `Configure GEMINI_API_KEY for an AI-written narrative of these same real numbers.`;
+
+  const dataQualityFlags = [
+    ...highMissing.map((m: any) => ({
+      column: m.column,
+      issue: `${m.missingPercent}% missing values`,
+      severity: (m.missingPercent > 50 ? 'High' : 'Medium') as 'High' | 'Medium' | 'Low'
+    })),
+    ...withOutliers.map((o: any) => ({
+      column: o.column,
+      issue: `${o.outlierCount} IQR-flagged outliers (${o.outlierPercent}%)`,
+      severity: (o.outlierPercent > 10 ? 'High' : 'Low') as 'High' | 'Medium' | 'Low'
+    }))
+  ];
+
+  const recommendedNextSteps = [
+    highMissing.length > 0 ? `Decide an imputation or drop strategy for: ${highMissing.map((m: any) => m.column).join(', ')}.` : null,
+    withOutliers.length > 0 ? `Review outliers in: ${withOutliers.map((o: any) => o.column).join(', ')} before training a model.` : null,
+    'Re-run this scan after cleaning to confirm the real numbers improved.'
+  ].filter((s): s is string => !!s);
+
+  return { summary, dataQualityFlags, recommendedNextSteps };
 }

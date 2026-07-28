@@ -25,7 +25,7 @@ import {
   ToggleLeft,
   Database
 } from 'lucide-react';
-import { Dataset, DatasetColumn } from '../types';
+import { Dataset, DatasetColumn, EdaReport as EdaReportType } from '../types';
 import {
   calculateFullNumericSummaries,
   mapAllMissingValues,
@@ -62,7 +62,31 @@ interface EDAReportProps {
 export default function EDAReport({ dataset, aiAnalysis, loadingAI, onTriggerAI }: EDAReportProps) {
   const { expertMode } = usePipelineContext();
   // State for Sub-Workspaces
-  const [activeSubTab, setActiveSubTab] = useState<'overview' | 'summaries' | 'integrity' | 'outliers' | 'correlation' | 'distributions' | 'categorical' | 'hypothesis' | 'abtest' | 'sql'>('overview');
+  const [activeSubTab, setActiveSubTab] = useState<'overview' | 'summaries' | 'integrity' | 'outliers' | 'correlation' | 'distributions' | 'categorical' | 'hypothesis' | 'abtest' | 'sql' | 'deepeda'>('overview');
+
+  // Real server-side EDA (Python/pandas) — computed on-demand since it hits the network.
+  const [deepEdaResult, setDeepEdaResult] = useState<EdaReportType | null>(null);
+  const [loadingDeepEda, setLoadingDeepEda] = useState<boolean>(false);
+  const [deepEdaError, setDeepEdaError] = useState<string | null>(null);
+
+  const runDeepEda = async () => {
+    setLoadingDeepEda(true);
+    setDeepEdaError(null);
+    try {
+      const res = await fetch('/api/eda', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ datasetRows: dataset.rows })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || body.hint || 'EDA request failed.');
+      setDeepEdaResult(body);
+    } catch (err: any) {
+      setDeepEdaError(err.message || 'Real EDA computation failed — is the ML compute service running?');
+    } finally {
+      setLoadingDeepEda(false);
+    }
+  };
 
   
   // Interactive distribution selections
@@ -271,6 +295,7 @@ export default function EDAReport({ dataset, aiAnalysis, loadingAI, onTriggerAI 
           { id: 'overview', label: 'Structure Overview', icon: Table },
           { id: 'summaries', label: 'Summary Statistics', icon: Binary },
           { id: 'integrity', label: 'Data Integrity Mapping', icon: AlertTriangle },
+          { id: 'deepeda', label: 'Deep EDA (Real, Server-Side)', icon: Database },
           ...(expertMode ? [
             { id: 'sql', label: 'SQL Assistant', icon: Database },
             { id: 'outliers', label: 'IQR Outlier Scan', icon: Percent },
@@ -1091,6 +1116,213 @@ export default function EDAReport({ dataset, aiAnalysis, loadingAI, onTriggerAI 
         {/* 10. SQL ASSISTANT */}
         {activeSubTab === 'sql' && (
           <SQLAssistant dataset={dataset} />
+        )}
+
+        {/* 11. DEEP EDA — REAL SERVER-SIDE PANDAS/NUMPY COMPUTATION */}
+        {activeSubTab === 'deepeda' && (
+          <div className="space-y-6 animate-fade-in">
+            {!deepEdaResult && (
+              <div className="relative bg-[#0E1325]/85 backdrop-blur-md text-white p-6 sm:p-8 rounded-2xl border border-indigo-500/20 shadow-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-6 overflow-hidden">
+                <div className="absolute right-0 top-0 translate-x-12 -translate-y-12 w-64 h-64 bg-indigo-500/15 rounded-full blur-3xl pointer-events-none animate-pulse" />
+                <div className="relative z-10 space-y-2.5">
+                  <span className="text-[9px] font-mono font-extrabold text-[#7e9dff] uppercase tracking-widest bg-indigo-500/15 px-3 py-1 rounded-full border border-indigo-500/25 font-mono">
+                    REAL SERVER-SIDE ANALYSIS
+                  </span>
+                  <h3 className="text-base sm:text-lg font-bold tracking-tight flex items-center gap-2 mt-1 font-sans">
+                    <Database className="w-5 h-5 text-indigo-400" /> Deep EDA Report (Python / pandas)
+                  </h3>
+                  <p className="text-xs text-slate-300 max-w-xl leading-relaxed font-sans">
+                    Runs genuine pandas/numpy computation on your dataset — skewness, IQR outliers, Pearson correlation, and a missing-value report — then asks Gemini to narrate strictly those exact numbers, nothing invented.
+                  </p>
+                </div>
+                <button
+                  onClick={runDeepEda}
+                  disabled={loadingDeepEda}
+                  className="relative z-10 bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs py-3 px-6 rounded-xl flex items-center justify-center gap-2.5 transition-all duration-300 shadow-lg shadow-indigo-600/40 border-0 cursor-pointer disabled:opacity-75 disabled:cursor-not-allowed shrink-0"
+                >
+                  {loadingDeepEda ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      Computing Real Stats...
+                    </>
+                  ) : (
+                    <>
+                      <Database className="w-4.5 h-4.5 text-slate-100" />
+                      Run Real Deep EDA
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {deepEdaError && (
+              <div className="p-4 bg-rose-500/10 border border-rose-500/20 text-rose-300 rounded-xl text-xs flex items-start gap-3">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <p>{deepEdaError}</p>
+              </div>
+            )}
+
+            {deepEdaResult && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono text-slate-500">
+                    {deepEdaResult.rowCount.toLocaleString()} rows × {deepEdaResult.columnCount} columns scanned
+                  </span>
+                  <button
+                    onClick={runDeepEda}
+                    disabled={loadingDeepEda}
+                    className="text-[10px] font-mono text-indigo-400 hover:text-indigo-300 disabled:opacity-50 cursor-pointer"
+                  >
+                    {loadingDeepEda ? 'Re-running…' : 'Re-run scan'}
+                  </button>
+                </div>
+
+                {/* Narrative panel — real numbers, AI (or template) narrated */}
+                {deepEdaResult.narrative && (
+                  <div className="bg-gradient-to-r from-slate-900 to-indigo-950/40 rounded-2xl border border-indigo-550/15 p-5 sm:p-6 shadow-xl">
+                    <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20 font-mono">
+                      Real Numbers, AI-Narrated
+                    </span>
+                    <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/60 p-4 rounded-xl border border-slate-850 font-sans mt-3">
+                      {deepEdaResult.narrative.summary}
+                    </p>
+
+                    {deepEdaResult.narrative.dataQualityFlags.length > 0 && (
+                      <div className="mt-4 space-y-1.5">
+                        <span className="text-[10px] uppercase font-mono font-bold text-amber-400">Data Quality Flags</span>
+                        {deepEdaResult.narrative.dataQualityFlags.map((f, i) => (
+                          <div key={i} className="text-[11px] bg-slate-950/50 p-2 rounded border border-slate-850 flex items-center gap-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase shrink-0 ${f.severity === 'High' ? 'bg-rose-500/15 text-rose-400' : f.severity === 'Medium' ? 'bg-amber-500/15 text-amber-400' : 'bg-slate-800 text-slate-400'}`}>{f.severity}</span>
+                            <strong className="text-slate-200">{f.column}:</strong>
+                            <span className="text-slate-400">{f.issue}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {deepEdaResult.narrative.recommendedNextSteps.length > 0 && (
+                      <div className="mt-4">
+                        <span className="text-[10px] uppercase font-mono font-bold text-emerald-400">Recommended Next Steps</span>
+                        <ul className="mt-1.5 space-y-1">
+                          {deepEdaResult.narrative.recommendedNextSteps.map((s, i) => (
+                            <li key={i} className="text-[11px] text-slate-300 flex items-start gap-1.5">
+                              <Dot className="w-3.5 h-3.5 text-indigo-400 shrink-0 -mt-0.5" />{s}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Real per-column distribution stats including skew */}
+                <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6">
+                  <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono mb-3">Real Per-Column Distribution Stats</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-[11px] font-mono border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400 text-[10px]">
+                          <th className="py-2 pr-3">Column</th>
+                          <th className="py-2 pr-3">Mean</th>
+                          <th className="py-2 pr-3">Median</th>
+                          <th className="py-2 pr-3">Std</th>
+                          <th className="py-2 pr-3">Skew</th>
+                          <th className="py-2 pr-3">Min</th>
+                          <th className="py-2 pr-3">Max</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-850/40">
+                        {deepEdaResult.numericSummaries.map((s, i) => (
+                          <tr key={i}>
+                            <td className="py-2 pr-3 text-white font-bold">{s.column}</td>
+                            <td className="py-2 pr-3 text-slate-300">{s.mean}</td>
+                            <td className="py-2 pr-3 text-slate-300">{s.median}</td>
+                            <td className="py-2 pr-3 text-slate-300">{s.std}</td>
+                            <td className={`py-2 pr-3 font-bold ${Math.abs(s.skew) > 1 ? 'text-amber-400' : 'text-emerald-400'}`} title="Fisher-Pearson skewness: 0 = symmetric">{s.skew}</td>
+                            <td className="py-2 pr-3 text-slate-500">{s.min}</td>
+                            <td className="py-2 pr-3 text-slate-500">{s.max}</td>
+                          </tr>
+                        ))}
+                        {deepEdaResult.numericSummaries.length === 0 && (
+                          <tr><td colSpan={7} className="py-3 text-center text-slate-500">No numeric columns to summarize.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Real outliers + missing report side by side */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6">
+                    <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono mb-3">Real IQR Outlier Counts</h4>
+                    <div className="space-y-1.5">
+                      {deepEdaResult.outliers.map((o, i) => (
+                        <div key={i} className="flex justify-between items-center text-[11px] bg-slate-950/50 p-2 rounded border border-slate-850">
+                          <span className="text-slate-300 font-mono">{o.column}</span>
+                          <span className={`font-mono font-bold ${o.outlierCount > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>{o.outlierCount} ({o.outlierPercent}%)</span>
+                        </div>
+                      ))}
+                      {deepEdaResult.outliers.length === 0 && (
+                        <p className="text-[11px] text-slate-500">No numeric columns to check for outliers.</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6">
+                    <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono mb-3">Real Missing-Value Report</h4>
+                    <div className="space-y-1.5">
+                      {deepEdaResult.missingReport.filter(m => m.missingCount > 0).map((m, i) => (
+                        <div key={i} className="flex justify-between items-center text-[11px] bg-slate-950/50 p-2 rounded border border-slate-850">
+                          <span className="text-slate-300 font-mono">{m.column}</span>
+                          <span className="font-mono font-bold text-amber-400">{m.missingCount} ({m.missingPercent}%)</span>
+                        </div>
+                      ))}
+                      {deepEdaResult.missingReport.every(m => m.missingCount === 0) && (
+                        <p className="text-[11px] text-emerald-400">No missing values detected in any column.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Real Pearson correlation matrix */}
+                {deepEdaResult.correlation && deepEdaResult.correlation.columns.length >= 2 && (
+                  <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6">
+                    <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono mb-3">Real Pearson Correlation Matrix</h4>
+                    <div className="overflow-x-auto">
+                      <table className="text-[10px] font-mono border-collapse">
+                        <thead>
+                          <tr>
+                            <th className="p-1.5 text-slate-500"></th>
+                            {deepEdaResult.correlation.columns.map(c => (
+                              <th key={c} className="p-1.5 text-slate-400 font-bold whitespace-nowrap">{c}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {deepEdaResult.correlation.matrix.map((row, rIdx) => (
+                            <tr key={rIdx}>
+                              <td className="p-1.5 text-slate-400 font-bold whitespace-nowrap">{deepEdaResult.correlation!.columns[rIdx]}</td>
+                              {row.map((val, cIdx) => {
+                                const v = val ?? 0;
+                                const intensity = Math.min(1, Math.abs(v));
+                                const bg = rIdx === cIdx
+                                  ? 'rgba(99,102,241,0.25)'
+                                  : v > 0 ? `rgba(16,185,129,${intensity * 0.5})` : `rgba(244,63,94,${intensity * 0.5})`;
+                                return (
+                                  <td key={cIdx} className="p-1.5 text-center text-slate-200" style={{ background: bg }}>
+                                    {val === null ? '—' : val.toFixed(2)}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
       </div>

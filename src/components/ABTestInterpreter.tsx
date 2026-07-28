@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AreaChart, BrainCircuit, Loader2, Copy, CheckCircle } from 'lucide-react';
+import { AreaChart, BrainCircuit, Loader2, Copy, CheckCircle, AlertCircle } from 'lucide-react';
 
 export default function ABTestInterpreter() {
   const [controlSize, setControlSize] = useState(1000);
@@ -12,6 +12,7 @@ export default function ABTestInterpreter() {
   const [loading, setLoading] = useState(false);
   const [memo, setMemo] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Manual calculation for A/B Test (Two Proportion Z-Test)
   const calculateTest = () => {
@@ -42,6 +43,7 @@ export default function ABTestInterpreter() {
   const generateMemo = async () => {
     setLoading(true);
     setMemo(null);
+    setError(null);
     try {
        const results = calculateTest();
        const response = await fetch('/api/ab-test-interpreter', {
@@ -49,12 +51,18 @@ export default function ABTestInterpreter() {
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ results, params: { controlSize, controlRate, treatmentSize, treatmentRate, confidence, testType } })
        });
+       if (!response.ok) {
+         throw new Error(`Server responded with ${response.status}`);
+       }
        const data = await response.json();
        if (data.memo) {
          setMemo(data.memo);
+       } else {
+         throw new Error('No memo was returned by the server.');
        }
-    } catch(err) {
+    } catch(err: any) {
        console.error(err);
+       setError(err.message || 'Network error generating the AI business memo.');
     } finally {
        setLoading(false);
     }
@@ -150,6 +158,13 @@ export default function ABTestInterpreter() {
              </button>
           </div>
        </div>
+
+       {error && (
+         <div className="p-4 bg-rose-500/10 border border-rose-500/20 text-rose-300 rounded-xl text-xs flex items-start gap-3">
+           <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+           <p>{error}</p>
+         </div>
+       )}
 
        {memo && (
          <div className="bg-slate-900/60 border border-indigo-500/20 rounded-xl p-6 shadow-xl relative animate-fade-in">

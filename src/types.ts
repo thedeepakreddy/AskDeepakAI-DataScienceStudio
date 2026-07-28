@@ -97,7 +97,15 @@ export interface MLResult {
     primaryMetric: string;
     metricValue: number;
     executionTimeMs: number;
+    cv?: { scores: number[]; mean: number; std: number; folds: number; metric: string; error?: string } | null;
   }[];
+  // Explainable AutoML selection rule, spelled out in plain language with the
+  // real numbers plugged in (never hidden from the UI).
+  selectionReason?: string;
+  // Real SHAP feature importance for the champion model (mean |SHAP value|
+  // aggregated back to original columns). Absent/undefined if SHAP couldn't
+  // explain this particular model — never fabricated as a substitute.
+  shapImportance?: { feature: string; score: number }[] | null;
   estimators?: {
     id: number;
     name: string;
@@ -138,4 +146,48 @@ export interface StakeholderInsightReport {
 export interface DashboardFilterState {
   slicers: Record<string, string[]>; // column -> list of selected categorical values
   rangeFilters: Record<string, { min: number; max: number; currentMin: number; currentMax: number }>; // numeric filter ranges
+}
+
+// Real, server-computed EDA report from the Python service's /eda endpoint —
+// every number here is genuine pandas/numpy computation, not narrated.
+export interface EdaReport {
+  rowCount: number;
+  columnCount: number;
+  numericSummaries: {
+    column: string;
+    count: number;
+    mean: number;
+    median: number;
+    std: number;
+    min: number;
+    max: number;
+    q1: number;
+    q3: number;
+    skew: number;
+  }[];
+  outliers: {
+    column: string;
+    q1: number;
+    q3: number;
+    iqr: number;
+    lowerBound: number;
+    upperBound: number;
+    outlierCount: number;
+    outlierPercent: number;
+    sampleOutliers: { rowIndex: number; value: number }[];
+  }[];
+  correlation: { columns: string[]; matrix: (number | null)[][] } | null;
+  missingReport: { column: string; missingCount: number; missingPercent: number }[];
+  categoricalSummaries: {
+    column: string;
+    distinctCount: number;
+    topValues: { value: string; count: number; percent: number }[];
+  }[];
+  // Gemini narrative (or honest template fallback) built strictly from the
+  // real numbers above — no numeric fields in this object, by design.
+  narrative?: {
+    summary: string;
+    dataQualityFlags: { column: string; issue: string; severity: 'High' | 'Medium' | 'Low' }[];
+    recommendedNextSteps: string[];
+  };
 }

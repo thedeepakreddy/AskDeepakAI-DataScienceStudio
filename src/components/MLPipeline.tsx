@@ -244,9 +244,11 @@ export default function MLPipeline({
       const comparedCount = mlResult.comparison?.length || 1;
       return {
         modelName: mlResult.modelAlgorithm,
-        reasoning: comparedCount > 1
+        // The real, explainable AutoML selection rule from the server — CV
+        // mean score with a stated tie-break — shown verbatim, never hidden.
+        reasoning: mlResult.selectionReason || (comparedCount > 1
           ? `Selected as the top performer out of ${comparedCount} real models trained and evaluated on your held-out test split.`
-          : `Trained and evaluated on your held-out test split using scikit-learn/XGBoost.`,
+          : `Trained and evaluated on your held-out test split using scikit-learn/XGBoost.`),
         primaryLabel: isClass ? 'Accuracy' : 'R² Score',
         primaryValue: primaryValue !== undefined ? primaryValue : null,
         isReal: true
@@ -271,6 +273,13 @@ export default function MLPipeline({
 
   const isBinaryConfusion = (cm: any): cm is { tp: number; tn: number; fp: number; fn: number; positiveLabel?: string } =>
     !!cm && typeof cm.tp === 'number';
+
+  // Real SHAP values are the more rigorous explainability signal when
+  // available; fall back to the model's own built-in importance otherwise.
+  // Both are real — this only decides which one is more trustworthy to lead with.
+  const hasShap = !!(mlResult?.shapImportance && mlResult.shapImportance.length > 0);
+  const importanceData = hasShap ? mlResult!.shapImportance! : (mlResult?.featureImportance || []);
+  const importanceLabel = hasShap ? 'Real SHAP Feature Importance' : 'Real Feature Importance (model built-in)';
 
   return (
     <div className="space-y-8 animate-fade-in" id="ml_module">
@@ -455,7 +464,7 @@ export default function MLPipeline({
 
             <div>
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest font-mono mb-2 px-0.5">
-                B. Input Features Selection
+                B. Feature Architect — Input Selection
               </label>
               <div className="max-h-[220px] overflow-y-auto space-y-1.5 border border-slate-850 p-3.5 rounded-xl bg-slate-950/45">
                 {dataset.columns
@@ -730,7 +739,7 @@ export default function MLPipeline({
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
                   <h3 className="font-extrabold text-white text-sm">Real Model Comparison Benchmarks</h3>
-                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">Each row is a model actually trained and scored on the same held-out test split</p>
+                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">Every candidate model is shown — ranked by cross-validation, not just the winner</p>
                 </div>
                 <Table className="w-4.5 h-4.5 text-indigo-400 shrink-0" />
               </div>
@@ -740,8 +749,8 @@ export default function MLPipeline({
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-405 text-[10px] font-bold text-slate-400 tracking-wider">
                       <th className="pb-2.5 font-bold">Trained Model</th>
-                      <th className="pb-2.5 font-bold">Primary Metric</th>
-                      <th className="pb-2.5 font-bold text-center">Score</th>
+                      <th className="pb-2.5 font-bold text-center">Test Score</th>
+                      <th className="pb-2.5 font-bold text-center">CV Mean (±std)</th>
                       <th className="pb-2.5 text-center font-bold">Train Time</th>
                       <th className="pb-2.5 text-right font-bold">Status</th>
                     </tr>
@@ -757,11 +766,16 @@ export default function MLPipeline({
                           )}
                           {row.modelName}
                         </td>
-                        <td className="text-slate-500 font-semibold">{row.primaryMetric}</td>
                         <td className="font-bold text-white text-center">
                           {row.primaryMetric.toLowerCase().includes('accuracy')
                             ? `${(row.metricValue * 100).toFixed(1)}%`
                             : row.metricValue.toFixed(3)}
+                          <span className="block text-[8.5px] text-slate-500 font-normal normal-case">{row.primaryMetric}</span>
+                        </td>
+                        <td className="text-center text-indigo-300 font-bold">
+                          {row.cv && !row.cv.error
+                            ? (row.cv.metric === 'accuracy' ? `${(row.cv.mean * 100).toFixed(1)}%` : row.cv.mean.toFixed(3)) + ` (±${row.cv.std.toFixed(3)})`
+                            : '—'}
                         </td>
                         <td className="text-slate-450 text-center">{row.executionTimeMs.toLocaleString()} ms</td>
                         <td className="text-right py-3 pr-1">
@@ -1172,14 +1186,14 @@ export default function MLPipeline({
                 {/* 1. Feature Importance Rankings (real, from the trained model — any algorithm) */}
                 <div className="bg-slate-900/40 backdrop-blur-md border border-slate-800 p-6 rounded-2xl space-y-4">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                    <h4 className="font-extrabold text-white text-xs tracking-wider uppercase font-mono text-indigo-400">Real Feature Importance Weights</h4>
+                    <h4 className="font-extrabold text-white text-xs tracking-wider uppercase font-mono text-indigo-400">{importanceLabel}</h4>
                     <BarChart2 className="w-4 h-4 text-indigo-400 shrink-0" />
                   </div>
 
                   <div className="h-[210px] mt-2">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart
-                        data={mlResult.featureImportance}
+                        data={importanceData}
                         layout="vertical"
                         margin={{ top: 5, right: 10, left: -20, bottom: 5 }}
                       >
@@ -1187,13 +1201,18 @@ export default function MLPipeline({
                         <XAxis type="number" stroke="#64748b" tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} fontSize={9} />
                         <YAxis type="category" dataKey="feature" stroke="#94a3b8" fontSize={9} tickLine={false} />
                         <Tooltip
-                          formatter={(val: any) => [`${(val * 100).toFixed(1)}%`, 'Real Importance Weight']}
+                          formatter={(val: any) => [`${(val * 100).toFixed(1)}%`, hasShap ? 'Mean |SHAP value| (normalized)' : 'Real Importance Weight']}
                           contentStyle={{ fontSize: '11px', background: 'rgba(15,23,42,0.9)', borderColor: '#334155', color: '#fff', borderRadius: '12px' }}
                         />
                         <Bar dataKey="score" fill="#6366f1" radius={[0, 4, 4, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
+                  {hasShap && (
+                    <p className="text-[9.5px] text-slate-500 leading-tight font-mono">
+                      Computed via SHAP on a real held-out test sample — the model-agnostic, game-theoretic gold standard for feature attribution.
+                    </p>
+                  )}
 
                   {mlResult.oobScore !== undefined && mlResult.oobScore !== null && (
                     <div className="bg-slate-950 p-3 rounded-xl border border-slate-850 flex justify-between items-center font-mono">

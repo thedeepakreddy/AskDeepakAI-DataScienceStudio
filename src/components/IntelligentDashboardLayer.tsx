@@ -39,6 +39,7 @@ export default function IntelligentDashboardLayer({ dataset, mlResult }: any) {
   } = useDashboardContext();
 
   const [loadingConfig, setLoadingConfig] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [loadingInsights, setLoadingInsights] = useState(false);
   const [copiedInsights, setCopiedInsights] = useState(false);
   const [customProblem, setCustomProblem] = useState('');
@@ -62,19 +63,26 @@ export default function IntelligentDashboardLayer({ dataset, mlResult }: any) {
 
   const runAutoConfig = async (problemOverride?: string) => {
     setLoadingConfig(true);
+    setConfigError(null);
     try {
       const response = await fetch('/api/dashboard/auto-configure', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile: datasetProfile, customProblem: problemOverride || customProblem })
       });
+      if (!response.ok) {
+        throw new Error(`Server responded with ${response.status}`);
+      }
       const data = await response.json();
       if (data && data.recommendedComponents) {
         setConfig(data);
         setActiveComponents(data.recommendedComponents.map((c: any) => c.type));
+      } else {
+        throw new Error('No dashboard configuration was returned.');
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to configure dashboard', e);
+      setConfigError(e.message || 'Could not auto-configure the dashboard. Check that the backend server is running.');
     } finally {
       setLoadingConfig(false);
     }
@@ -209,6 +217,21 @@ export default function IntelligentDashboardLayer({ dataset, mlResult }: any) {
         <Loader2 className="w-8 h-8 text-indigo-500 animate-spin mb-4" />
         <h3 className="text-sm font-bold text-slate-300">Intelligent Dashboard Configurator</h3>
         <p className="text-xs text-slate-500 mt-2">AI is analyzing {dataset.columns.length} features to recommend components...</p>
+      </div>
+    );
+  }
+
+  if (configError && !config) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 bg-slate-900 border border-rose-500/20 rounded-xl text-center">
+        <h3 className="text-sm font-bold text-rose-300">Dashboard Auto-Configuration Failed</h3>
+        <p className="text-xs text-slate-400 mt-2 max-w-md">{configError}</p>
+        <button
+          onClick={() => runAutoConfig()}
+          className="mt-5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs py-2.5 px-5 rounded-lg transition-all"
+        >
+          Retry
+        </button>
       </div>
     );
   }

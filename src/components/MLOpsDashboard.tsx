@@ -29,6 +29,7 @@ export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashb
   const [deployStatus, setDeployStatus] = useState<'idle' | 'deploying' | 'online'>('idle');
   const [deployError, setDeployError] = useState<string | null>(null);
   const [driftData, setDriftData] = useState<DriftMetrics | null>(null);
+  const [driftError, setDriftError] = useState<string | null>(null);
   const [deploySummary, setDeploySummary] = useState<{ modelName: string; metricLabel: string; metricValue: number } | null>(null);
 
   const resolvedTarget = (target && dataset.columns.some(c => c.name === target))
@@ -84,6 +85,7 @@ export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashb
     const referenceRows = dataset.rows.slice(0, mid).map(r => pickColumns(r, numericCols));
     const currentRows = dataset.rows.slice(mid).map(r => pickColumns(r, numericCols));
 
+    setDriftError(null);
     try {
       const response = await fetch('/api/drift-metrics', {
         method: 'POST',
@@ -93,8 +95,9 @@ export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashb
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Drift check failed.');
       setDriftData(data.drift_status);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setDriftError(err.message || 'Drift check failed — is the ML compute service running?');
     }
   };
 
@@ -159,6 +162,13 @@ export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashb
               Comparing the first half of your active dataset (reference) against the second half (current) — this app has no separate live production stream, so this is a genuine statistical comparison of real historical data rather than simulated traffic.
             </p>
 
+            {driftError && (
+              <div className="p-3 mb-4 bg-rose-500/10 border border-rose-500/20 text-rose-300 rounded-xl text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <p>{driftError}</p>
+              </div>
+            )}
+
             {!expertMode ? (
                // BEGINNER MODE: Simple badges
                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -171,7 +181,7 @@ export default function MLOpsDashboard({ dataset, target, features }: MLOpsDashb
                      </div>
                    </div>
                  ))}
-                 {chartData.length === 0 && (
+                 {chartData.length === 0 && !driftError && (
                    <div className="col-span-3 text-center text-slate-500 text-xs py-4">No numeric columns available for drift analysis.</div>
                  )}
                </div>

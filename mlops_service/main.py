@@ -5,40 +5,55 @@ Real, honest model training. Every number returned by this service comes from
 an actually-fitted scikit-learn / XGBoost estimator evaluated on a held-out
 test split — nothing here is narrated or guessed by an LLM.
 """
-import uuid
+import os
 import time
-from typing import List, Dict, Any, Optional, Literal
+import uuid
+from typing import Any, Literal
 
+import joblib
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
-import joblib
-
-import os
-
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
-from sklearn.model_selection import train_test_split, cross_val_score, KFold, StratifiedKFold
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.neural_network import MLPClassifier, MLPRegressor
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix,
-    roc_auc_score, r2_score, mean_squared_error, mean_absolute_error
+from sklearn.ensemble import (
+    GradientBoostingClassifier,
+    GradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
 )
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score, train_test_split
+from sklearn.neural_network import MLPClassifier, MLPRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
 
 try:
     from xgboost import XGBClassifier, XGBRegressor
     HAS_XGBOOST = True
 except ImportError:  # pragma: no cover - environment-dependent
     HAS_XGBOOST = False
+
+try:
+    import shap
+    HAS_SHAP = True
+except ImportError:  # pragma: no cover - environment-dependent
+    HAS_SHAP = False
 
 
 class LabelEncodedClassifier(BaseEstimator, ClassifierMixin):
@@ -77,11 +92,13 @@ class LabelEncodedClassifier(BaseEstimator, ClassifierMixin):
 app = FastAPI(title="AskDeepakAI MLOps Service")
 
 MAX_STORED_MODELS = 25
-model_store: Dict[str, Dict[str, Any]] = {}
-model_order: List[str] = []
+model_store: dict[str, dict[str, Any]] = {}
+model_order: list[str] = []
 
-VALID_MODEL_KEYS = ["linear", "random_forest", "xgboost", "mlp"]
-DEFAULT_MODELS = ["linear", "random_forest", "xgboost"]
+VALID_MODEL_KEYS = ["linear", "random_forest", "gradient_boosting", "xgboost", "mlp"]
+# AutoML mode trains all 5 real candidates and ranks them — the point of an
+# AutoML pipeline is comparing genuine alternatives, not training one model.
+DEFAULT_MODELS = ["linear", "random_forest", "gradient_boosting", "xgboost", "mlp"]
 
 
 # --------------------------------------------------------------------------
@@ -89,25 +106,29 @@ DEFAULT_MODELS = ["linear", "random_forest", "xgboost"]
 # --------------------------------------------------------------------------
 
 class TrainRequest(BaseModel):
-    data: List[Dict[str, Any]]
+    data: list[dict[str, Any]]
     target: str
-    features: Optional[List[str]] = None
-    task_type: Optional[Literal["classification", "regression"]] = None
-    models: Optional[List[str]] = None
+    features: list[str] | None = None
+    task_type: Literal["classification", "regression"] | None = None
+    models: list[str] | None = None
     test_size: float = Field(default=0.2, gt=0.0, lt=0.9)
     cv_folds: int = Field(default=5, ge=2, le=10)
     random_state: int = 42
-    hyperparameters: Optional[Dict[str, Any]] = None
+    hyperparameters: dict[str, Any] | None = None
 
 
 class PredictRequest(BaseModel):
     model_id: str
-    features: List[Dict[str, Any]]
+    features: list[dict[str, Any]]
 
 
 class DriftRequest(BaseModel):
-    reference_data: List[Dict[str, Any]]
-    current_data: List[Dict[str, Any]]
+    reference_data: list[dict[str, Any]]
+    current_data: list[dict[str, Any]]
+
+
+class EdaRequest(BaseModel):
+    data: list[dict[str, Any]]
 
 
 # --------------------------------------------------------------------------
@@ -137,7 +158,7 @@ def build_preprocessor(X: pd.DataFrame, scale_numeric: bool) -> ColumnTransforme
     return ColumnTransformer(transformers=transformers, remainder="drop")
 
 
-def make_estimator(model_key: str, task: str, hyperparameters: Dict[str, Any]):
+def make_estimator(model_key: str, task: str, hyperparameters: dict[str, Any]):
     n_estimators = int(hyperparameters.get("n_estimators", 100))
     max_depth = hyperparameters.get("max_depth")
     max_depth = int(max_depth) if max_depth not in (None, "") else None
@@ -156,6 +177,10 @@ def make_estimator(model_key: str, task: str, hyperparameters: Dict[str, Any]):
         # (each tree is evaluated only on the rows it didn't see during bagging)
         # without costing an extra train/test split.
         return cls(n_estimators=n_estimators, max_depth=max_depth, random_state=random_state, oob_score=True)
+
+    if model_key == "gradient_boosting":
+        cls = GradientBoostingClassifier if task == "classification" else GradientBoostingRegressor
+        return cls(n_estimators=n_estimators, max_depth=max_depth or 3, learning_rate=learning_rate, random_state=random_state)
 
     if model_key == "xgboost":
         if not HAS_XGBOOST:
@@ -190,25 +215,26 @@ def display_name(model_key: str, task: str) -> str:
     names = {
         "linear": "Logistic Regression" if task == "classification" else "Linear Regression",
         "random_forest": "Random Forest " + ("Classifier" if task == "classification" else "Regressor"),
+        "gradient_boosting": "Gradient Boosting " + ("Classifier" if task == "classification" else "Regressor"),
         "xgboost": "XGBoost " + ("Classifier" if task == "classification" else "Regressor"),
         "mlp": "Multi-Layer Perceptron (Neural Network)",
     }
     return names.get(model_key, model_key)
 
 
-def get_transformed_feature_names(preprocessor: ColumnTransformer) -> List[str]:
+def get_transformed_feature_names(preprocessor: ColumnTransformer) -> list[str]:
     try:
         return list(preprocessor.get_feature_names_out())
     except Exception:
         return []
 
 
-def aggregate_importance_to_original(raw_names: List[str], raw_scores: List[float]) -> List[Dict[str, Any]]:
+def aggregate_importance_to_original(raw_names: list[str], raw_scores: list[float]) -> list[dict[str, Any]]:
     """One-hot encoding explodes a single original column into many transformed
     columns (e.g. num__Age, cat__Country_US, cat__Country_UK). Sum the
     contributions back onto the original column name so the UI shows a
     feature importance chart users can actually map back to their data."""
-    agg: Dict[str, float] = {}
+    agg: dict[str, float] = {}
     for name, score in zip(raw_names, raw_scores):
         # strip the ColumnTransformer prefix ("num__" / "cat__")
         stripped = name.split("__", 1)[-1] if "__" in name else name
@@ -226,7 +252,7 @@ def aggregate_importance_to_original(raw_names: List[str], raw_scores: List[floa
     return result
 
 
-def extract_feature_importance(estimator, preprocessor: ColumnTransformer) -> List[Dict[str, Any]]:
+def extract_feature_importance(estimator, preprocessor: ColumnTransformer) -> list[dict[str, Any]]:
     names = get_transformed_feature_names(preprocessor)
     if hasattr(estimator, "feature_importances_"):
         scores = list(estimator.feature_importances_)
@@ -240,7 +266,7 @@ def extract_feature_importance(estimator, preprocessor: ColumnTransformer) -> Li
     return aggregate_importance_to_original(names, scores)
 
 
-def extract_rf_tree_splits(estimator, preprocessor: ColumnTransformer, max_trees: int = 6) -> List[Dict[str, Any]]:
+def extract_rf_tree_splits(estimator, preprocessor: ColumnTransformer, max_trees: int = 6) -> list[dict[str, Any]]:
     """Pull genuine root-split data out of real fitted DecisionTree estimators
     inside a RandomForest. Nothing here is invented — it's read directly off
     sklearn's tree_.feature / tree_.threshold / tree_.impurity arrays."""
@@ -267,7 +293,7 @@ def extract_rf_tree_splits(estimator, preprocessor: ColumnTransformer, max_trees
     return out
 
 
-def choose_positive_label(y_train, classes_: List[Any]):
+def choose_positive_label(y_train, classes_: list[Any]):
     """For binary targets with arbitrary label values (e.g. 'Yes'/'No',
     'Active'/'Churned'), there's no universal 'positive' class. We deterministically
     treat the minority class in the training data as positive — the standard
@@ -280,9 +306,9 @@ def choose_positive_label(y_train, classes_: List[Any]):
     return pos_label, neg_label, pos_idx
 
 
-def compute_classification_metrics(y_test, y_pred, y_proba, is_binary: bool, pos_label=None, pos_idx=None) -> Dict[str, Any]:
+def compute_classification_metrics(y_test, y_pred, y_proba, is_binary: bool, pos_label=None, pos_idx=None) -> dict[str, Any]:
     if is_binary:
-        metrics: Dict[str, Any] = {
+        metrics: dict[str, Any] = {
             "accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
             "precision": round(float(precision_score(y_test, y_pred, pos_label=pos_label, average="binary", zero_division=0)), 4),
             "recall": round(float(recall_score(y_test, y_pred, pos_label=pos_label, average="binary", zero_division=0)), 4),
@@ -312,10 +338,10 @@ def compute_confusion_matrix(y_test, y_pred, is_binary: bool, pos_label=None, ne
 
     labels = sorted(pd.unique(pd.Series(list(y_test) + list(y_pred))), key=str)
     cm = confusion_matrix(y_test, y_pred, labels=labels)
-    return {"matrix": cm.tolist(), "labels": [str(l) for l in labels]}
+    return {"matrix": cm.tolist(), "labels": [str(lbl) for lbl in labels]}
 
 
-def compute_regression_metrics(y_test, y_pred) -> Dict[str, Any]:
+def compute_regression_metrics(y_test, y_pred) -> dict[str, Any]:
     mse = mean_squared_error(y_test, y_pred)
     return {
         "r2Score": round(float(r2_score(y_test, y_pred)), 4),
@@ -335,7 +361,114 @@ def to_native(value):
     return value
 
 
-def store_model(pipeline: Pipeline, meta: Dict[str, Any]) -> str:
+def rank_by_cross_validation(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """AutoML model selection rule, made explicit rather than hidden: rank by
+    mean cross-validation score (more robust than a single held-out test
+    split), highest first; ties broken by lowest fold-to-fold standard
+    deviation (the more consistent model wins). Models whose CV run failed
+    are ranked after every model with valid CV, ordered among themselves by
+    their held-out test score as a fallback."""
+    def sort_key(r):
+        cv = r.get("cv") or {}
+        cv_mean = cv.get("mean")
+        cv_std = cv.get("std")
+        if cv_mean is None:
+            return (1, 0.0, -r["primaryMetricValue"])
+        return (0, -cv_mean, cv_std if cv_std is not None else 0.0)
+
+    return sorted(results, key=sort_key)
+
+
+def build_selection_reason(results: list[dict[str, Any]]) -> str:
+    """Explains the AutoML pick in plain language, using only the real
+    numbers already computed above — this is the exact rule rank_by_cross_validation
+    applies, just spelled out for the UI instead of left implicit."""
+    champion = results[0]
+    cv = champion.get("cv") or {}
+    cv_mean = cv.get("mean")
+
+    if cv_mean is None:
+        return (f"{champion['modelName']} selected on held-out test {champion['primaryMetric']} "
+                f"({champion['primaryMetricValue']}) — cross-validation could not be computed for this run.")
+
+    reason = (f"{champion['modelName']} selected for the highest {cv.get('folds')}-fold cross-validation "
+              f"mean {cv.get('metric')} ({round(cv_mean, 4)})")
+
+    if len(results) > 1:
+        runner_up = results[1]
+        ru_cv = runner_up.get("cv") or {}
+        ru_mean = ru_cv.get("mean")
+        if ru_mean is not None and abs(cv_mean - ru_mean) < 0.005:
+            champ_std = cv.get("std", 0.0)
+            ru_std = ru_cv.get("std", 0.0)
+            reason += (f", tie-broken against {runner_up['modelName']} (CV mean {round(ru_mean, 4)}) "
+                       f"by lower fold-to-fold variance (std {round(champ_std, 4)} vs {round(ru_std, 4)})")
+
+    return reason + "."
+
+
+def compute_shap_importance(pipeline: Pipeline, X_sample: pd.DataFrame, model_key: str, task: str, max_features: int = 10) -> list[dict[str, Any]] | None:
+    """Computes real SHAP values for the champion model on a bounded sample
+    of the held-out test set, then aggregates mean(|SHAP value|) back to
+    original column names. Returns None (never fabricated numbers) if SHAP
+    can't explain this particular model/version combination."""
+    if not HAS_SHAP:
+        return None
+    try:
+        preprocessor = pipeline.named_steps["preprocess"]
+        estimator = pipeline.named_steps["model"]
+        X_transformed = preprocessor.transform(X_sample)
+        if hasattr(X_transformed, "toarray"):
+            X_transformed = X_transformed.toarray()
+        names = get_transformed_feature_names(preprocessor)
+
+        # LabelEncodedClassifier (used for xgboost classification) wraps the
+        # real estimator SHAP needs to introspect directly.
+        shap_estimator = estimator.base_estimator if isinstance(estimator, LabelEncodedClassifier) else estimator
+
+        if model_key in ("random_forest", "gradient_boosting", "xgboost"):
+            explainer = shap.TreeExplainer(shap_estimator)
+            raw_values = explainer.shap_values(X_transformed)
+        elif model_key == "linear":
+            explainer = shap.LinearExplainer(shap_estimator, X_transformed)
+            raw_values = explainer.shap_values(X_transformed)
+        else:
+            # Generic bounded explainer (e.g. MLP) — background sample kept
+            # small since this path is far more compute-expensive. For
+            # classification this must explain predict_proba (numeric), not
+            # predict (returns string class labels SHAP's masking can't
+            # handle numerically).
+            background_n = min(30, len(X_transformed))
+            predict_fn = (
+                shap_estimator.predict_proba
+                if task == "classification" and hasattr(shap_estimator, "predict_proba")
+                else shap_estimator.predict
+            )
+            explainer = shap.Explainer(predict_fn, X_transformed[:background_n])
+            raw_values = explainer(X_transformed).values
+
+        # Normalize the many shapes SHAP can return across versions/model
+        # families into a single (n_samples, n_features) magnitude array.
+        if isinstance(raw_values, list):
+            arr = np.mean([np.abs(np.asarray(v)) for v in raw_values], axis=0)
+        else:
+            arr = np.asarray(raw_values)
+            if arr.ndim == 3:
+                arr = np.abs(arr).mean(axis=-1)
+            else:
+                arr = np.abs(arr)
+
+        mean_abs = np.asarray(arr).mean(axis=0).flatten()
+        if not names or len(names) != len(mean_abs):
+            return None
+
+        importance = aggregate_importance_to_original(names, list(mean_abs))
+        return importance[:max_features]
+    except Exception:
+        return None
+
+
+def store_model(pipeline: Pipeline, meta: dict[str, Any]) -> str:
     model_id = str(uuid.uuid4())
     model_store[model_id] = {"pipeline": pipeline, "meta": meta}
     model_order.append(model_id)
@@ -548,9 +681,21 @@ def train_model(request: TrainRequest):
     if not results:
         raise HTTPException(status_code=500, detail=f"All requested models failed to train: {errors}")
 
-    # Rank by primary metric (higher is better for accuracy and r2)
-    results.sort(key=lambda r: r["primaryMetricValue"], reverse=True)
+    results = rank_by_cross_validation(results)
     champion = results[0]
+    selection_reason = build_selection_reason(results)
+
+    # Real SHAP explainability for the champion only (computing it for every
+    # candidate would multiply training time for no benefit to the user).
+    champion["shapImportance"] = None
+    if HAS_SHAP:
+        champion_stored = model_store.get(champion["modelId"])
+        if champion_stored:
+            sample_n = min(100, len(X_test))
+            X_shap_sample = X_test.iloc[:sample_n]
+            champion["shapImportance"] = compute_shap_importance(
+                champion_stored["pipeline"], X_shap_sample, champion["modelKey"], task
+            )
 
     return {
         "status": "success",
@@ -559,6 +704,7 @@ def train_model(request: TrainRequest):
         "target": request.target,
         "features": feature_cols,
         "champion": champion,
+        "selectionReason": selection_reason,
         "comparison": [
             {
                 "modelKey": r["modelKey"],
@@ -566,11 +712,119 @@ def train_model(request: TrainRequest):
                 "primaryMetric": r["primaryMetric"],
                 "metricValue": r["primaryMetricValue"],
                 "executionTimeMs": r["executionTimeMs"],
+                "cv": r.get("cv"),
             } for r in results
         ],
         "results": results,
         "errors": errors,
         "trainRatio": round(1 - request.test_size, 2),
+    }
+
+
+@app.post("/eda")
+def run_eda(request: EdaRequest):
+    """Real, server-side exploratory data analysis. Everything returned here
+    is computed directly by pandas/numpy over the actual uploaded rows — mean,
+    median, std, skew, IQR-based outliers, and Pearson correlation are all
+    genuine statistics, not narrated guesses."""
+    if not request.data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+
+    df = pd.DataFrame(request.data)
+    if len(df) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 rows to compute EDA statistics.")
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = [c for c in df.columns if c not in numeric_cols]
+
+    missing_report = [
+        {
+            "column": col,
+            "missingCount": int(df[col].isna().sum()),
+            "missingPercent": round(float(df[col].isna().sum()) / len(df) * 100, 2),
+        }
+        for col in df.columns
+    ]
+
+    numeric_summaries = []
+    outlier_report = []
+    for col in numeric_cols:
+        series = df[col].dropna()
+        if len(series) == 0:
+            continue
+        q1 = float(series.quantile(0.25))
+        q3 = float(series.quantile(0.75))
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+
+        numeric_summaries.append({
+            "column": col,
+            "count": int(len(series)),
+            "mean": round(float(series.mean()), 4),
+            "median": round(float(series.median()), 4),
+            "std": round(float(series.std(ddof=0)), 4) if len(series) > 1 else 0.0,
+            "min": round(float(series.min()), 4),
+            "max": round(float(series.max()), 4),
+            "q1": round(q1, 4),
+            "q3": round(q3, 4),
+            # Fisher-Pearson skewness: 0 symmetric, >0 right-tailed, <0 left-tailed.
+            "skew": round(float(series.skew()), 4) if len(series) > 2 else 0.0,
+        })
+
+        outlier_mask = (series < lower_bound) | (series > upper_bound)
+        outlier_series = series[outlier_mask]
+        outlier_report.append({
+            "column": col,
+            "q1": round(q1, 4),
+            "q3": round(q3, 4),
+            "iqr": round(iqr, 4),
+            "lowerBound": round(lower_bound, 4),
+            "upperBound": round(upper_bound, 4),
+            "outlierCount": int(outlier_mask.sum()),
+            "outlierPercent": round(float(outlier_mask.sum()) / len(series) * 100, 2),
+            "sampleOutliers": [
+                {"rowIndex": to_native(idx), "value": to_native(val)}
+                for idx, val in outlier_series.head(50).items()
+            ],
+        })
+
+    correlation = None
+    if len(numeric_cols) >= 2:
+        corr_df = df[numeric_cols].corr(method="pearson")
+        correlation = {
+            "columns": numeric_cols,
+            "matrix": [
+                [None if pd.isna(v) else round(float(v), 4) for v in row]
+                for row in corr_df.values.tolist()
+            ],
+        }
+
+    categorical_summaries = []
+    for col in categorical_cols:
+        non_null_total = int(df[col].notna().sum())
+        top_counts = df[col].value_counts(dropna=True).head(10)
+        categorical_summaries.append({
+            "column": col,
+            "distinctCount": int(df[col].nunique(dropna=True)),
+            "topValues": [
+                {
+                    "value": str(idx),
+                    "count": int(cnt),
+                    "percent": round(int(cnt) / non_null_total * 100, 2) if non_null_total > 0 else 0.0,
+                }
+                for idx, cnt in top_counts.items()
+            ],
+        })
+
+    return {
+        "rowCount": int(len(df)),
+        "columnCount": int(len(df.columns)),
+        "numericSummaries": numeric_summaries,
+        "outliers": outlier_report,
+        "correlation": correlation,
+        "missingReport": missing_report,
+        "categoricalSummaries": categorical_summaries,
     }
 
 
