@@ -1,4 +1,4 @@
-#  AskDeepakAI - Data Scientist Agent
+#  AskDeepakAI - Data Science Studio
 [![CI](https://github.com/thedeepakreddy/AskDeepakAI-DataScientist/actions/workflows/ci.yml/badge.svg)](https://github.com/thedeepakreddy/AskDeepakAI-DataScientist/actions/workflows/ci.yml)
 
 > Interactive, telemetry-free Data Science Workstation & Automated Machine Learning modeling engine powered by Google Gemini.
