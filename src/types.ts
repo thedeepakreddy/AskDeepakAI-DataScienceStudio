@@ -28,7 +28,7 @@ export interface Dataset {
 
 export interface CleaningOperation {
   id: string;
-  type: 'drop_column' | 'fill_missing' | 'type_convert' | 'filter_rows';
+  type: 'drop_column' | 'fill_missing' | 'type_convert' | 'filter_rows' | 'add_row' | 'delete_row';
   column: string;
   params: Record<string, any>;
 }

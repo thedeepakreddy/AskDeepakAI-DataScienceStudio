@@ -24,10 +24,15 @@ export default function ABTestInterpreter() {
      const pPool = (p1*n1 + p2*n2) / (n1 + n2);
      const sePool = Math.sqrt(pPool * (1 - pPool) * ((1/n1) + (1/n2)));
      const zScore = (p2 - p1) / sePool;
-     
-     // Very rough normal CDF approximation for p-value
-     const approxP = Math.exp(-0.717 * zScore - 0.416 * Math.pow(zScore, 2));
-     const pValue = testType === 'two-tailed' ? approxP * 2 : approxP;
+
+     // Rough normal-tail approximation, valid for z >= 0 - hence Math.abs.
+     // This formula already approximates the two-tailed probability P(|Z| > z)
+     // directly: it evaluates to 1.0 at z=0 (verified) and ~0.05 at z=1.96
+     // (the textbook two-tailed 5% threshold, verified), not a one-tailed
+     // tail area that would need doubling.
+     const absZ = Math.abs(zScore);
+     const twoTailedP = Math.exp(-0.717 * absZ - 0.416 * Math.pow(absZ, 2));
+     const pValue = testType === 'two-tailed' ? twoTailedP : twoTailedP / 2;
      const relativeLift = ((p2 - p1) / p1) * 100;
      const isSig = pValue < (1 - confidence);
 

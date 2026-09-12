@@ -965,32 +965,44 @@ if __name__ == "__main__":
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const leafletMapInstanceRef = useRef<L.Map | null>(null);
+  const markersLayerRef = useRef<L.LayerGroup | null>(null);
+  const hasAutoFitRef = useRef(false);
 
+  // Create the map + tile layer exactly once. Recreating the whole map on
+  // every mapDataPoints change (as before) discarded the user's pan/zoom and
+  // re-fetched every basemap tile on each filter tweak.
   useEffect(() => {
-    if (!mapContainerRef.current) return;
-
-    // Clean up existing map instance if any
-    if (leafletMapInstanceRef.current) {
-      leafletMapInstanceRef.current.remove();
-      leafletMapInstanceRef.current = null;
-    }
-
-    const initialLat = mapDataPoints.length > 0 ? mapDataPoints[0].lat : 20;
-    const initialLon = mapDataPoints.length > 0 ? mapDataPoints[0].lon : 0;
-    const initialZoom = mapDataPoints.length > 0 ? 3 : 2;
+    if (!mapContainerRef.current || leafletMapInstanceRef.current) return;
 
     const map = L.map(mapContainerRef.current, {
-      center: [initialLat, initialLon],
-      zoom: initialZoom,
+      center: [20, 0],
+      zoom: 2,
       zoomControl: true,
       attributionControl: false
     });
 
     leafletMapInstanceRef.current = map;
+    markersLayerRef.current = L.layerGroup().addTo(map);
 
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       maxZoom: 18
     }).addTo(map);
+
+    return () => {
+      map.remove();
+      leafletMapInstanceRef.current = null;
+      markersLayerRef.current = null;
+    };
+  }, []);
+
+  // Re-sync just the markers whenever the filtered data changes, leaving the
+  // existing map instance - and whatever view the user has panned/zoomed to - alone.
+  useEffect(() => {
+    const map = leafletMapInstanceRef.current;
+    const layer = markersLayerRef.current;
+    if (!map || !layer) return;
+
+    layer.clearLayers();
 
     // Render interactive point coordinates on the real map canvas
     mapDataPoints.slice(0, 150).forEach(pt => {
@@ -1001,7 +1013,7 @@ if __name__ == "__main__":
           iconSize: [14, 14],
           iconAnchor: [7, 7]
         })
-      }).addTo(map);
+      }).addTo(layer);
 
       // Interactive popup with custom layout styles
       marker.bindPopup(`
@@ -1020,12 +1032,13 @@ if __name__ == "__main__":
       });
     });
 
-    return () => {
-      if (leafletMapInstanceRef.current) {
-        leafletMapInstanceRef.current.remove();
-        leafletMapInstanceRef.current = null;
-      }
-    };
+    // Frame the data once, the first time real points show up, rather than
+    // on every subsequent filter tweak - that repeated re-framing was the bug.
+    if (!hasAutoFitRef.current && mapDataPoints.length > 0) {
+      hasAutoFitRef.current = true;
+      const bounds = L.latLngBounds(mapDataPoints.map(pt => [pt.lat, pt.lon] as [number, number]));
+      map.fitBounds(bounds, { maxZoom: 4, padding: [20, 20] });
+    }
   }, [mapDataPoints]);
 
   // Continent aggregated data computed dynamically

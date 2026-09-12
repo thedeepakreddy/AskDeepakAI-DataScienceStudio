@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   FileSpreadsheet,
@@ -47,6 +47,10 @@ import LoadingScreen from './components/LoadingScreen';
 
 export default function App() {
   const [showLoading, setShowLoading] = useState(true);
+  // Stable identity across re-renders - LoadingScreen's dismiss timer effect
+  // depends on this callback, so a fresh function reference on every App
+  // render would keep restarting that timer for as long as showLoading stays true.
+  const handleLoadingComplete = useCallback(() => setShowLoading(false), []);
   const { businessProblem, bannerDismissed, setBannerDismissed, expertMode, setExpertMode, setHasRunEda } = usePipelineContext();
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     if (typeof window !== 'undefined') {
@@ -256,7 +260,7 @@ export default function App() {
   return (
     <div className={`min-h-screen bg-transparent text-slate-100 flex flex-col font-sans selection:bg-indigo-500/20 selection:text-indigo-300 ${theme === 'light' ? 'light' : ''}`} id="workstation_app">
       {/* Loading Screen Overlay */}
-      {showLoading && <LoadingScreen onComplete={() => setShowLoading(false)} />}
+      {showLoading && <LoadingScreen onComplete={handleLoadingComplete} />}
 
       {/* Animated Glowing AskDeepakAI Logo Neural Background Chip */}
       <NeuralBackground />

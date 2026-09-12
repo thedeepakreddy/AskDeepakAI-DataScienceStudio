@@ -9,8 +9,6 @@ interface SmartBoxPlotProps {
 export default function SmartBoxPlot({ column, groupColumn }: SmartBoxPlotProps) {
   const { filteredData } = useDashboardContext();
 
-  if (!filteredData || filteredData.length === 0) return null;
-
   const plotData = useMemo(() => {
     if (!filteredData || filteredData.length === 0) return [];
 

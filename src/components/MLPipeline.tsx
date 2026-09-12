@@ -38,6 +38,7 @@ import {
   ResponsiveContainer,
   ScatterChart,
   Scatter,
+  Cell,
   Legend,
   Line,
   LineChart as RechartsLineChart
@@ -1121,7 +1122,7 @@ export default function MLPipeline({
                           {unsupervisedRes.pcaComponents.map((pt, index) => {
                             const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#c084fc'];
                             const dotColor = colors[pt.clusterId % colors.length];
-                            return <cell key={`cell-${index}`} fill={dotColor} />;
+                            return <Cell key={`cell-${index}`} fill={dotColor} />;
                           })}
                         </Scatter>
                       </ScatterChart>

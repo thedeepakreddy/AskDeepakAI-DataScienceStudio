@@ -331,7 +331,14 @@ def choose_positive_label(y_train, classes_: list[Any]):
     class of interest is the rarer one."""
     counts = pd.Series(y_train).value_counts()
     pos_label = counts.idxmin()
-    neg_label = [c for c in classes_ if c != pos_label][0]
+    other_classes = [c for c in classes_ if c != pos_label]
+    if not other_classes:
+        # Extreme class imbalance collapsed y_train to a single class after
+        # the split (e.g. a non-stratified fallback split when the minority
+        # class had too few rows to stratify) - the fitted model never saw a
+        # second class, so there is no real positive/negative pair to report.
+        return None, None, None
+    neg_label = other_classes[0]
     pos_idx = list(classes_).index(pos_label)
     return pos_label, neg_label, pos_idx
 
@@ -675,8 +682,14 @@ def train_model(request: TrainRequest):
                 pos_label = neg_label = pos_idx = None
                 if is_binary and hasattr(fitted_estimator, "classes_"):
                     pos_label, neg_label, pos_idx = choose_positive_label(y_train, fitted_estimator.classes_)
-                metrics = compute_classification_metrics(y_test, y_pred, y_proba, is_binary, pos_label, pos_idx)
-                confusion = compute_confusion_matrix(y_test, y_pred, is_binary, pos_label, neg_label)
+                # A degenerate split (y_train collapsed to one class) leaves
+                # pos_label unresolved even though is_binary was true for the
+                # dataset as a whole - fall back to the same weighted/macro
+                # metrics path used for genuinely multi-class targets instead
+                # of feeding sklearn a positive label the fitted model never learned.
+                effective_binary = is_binary and pos_label is not None
+                metrics = compute_classification_metrics(y_test, y_pred, y_proba, effective_binary, pos_label, pos_idx)
+                confusion = compute_confusion_matrix(y_test, y_pred, effective_binary, pos_label, neg_label)
                 primary_metric_name = "accuracy"
                 primary_metric_value = metrics["accuracy"]
             else:

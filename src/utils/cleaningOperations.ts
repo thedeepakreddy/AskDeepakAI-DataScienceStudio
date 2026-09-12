@@ -16,5 +16,11 @@ export function describeCleaningOperation(op: CleaningOperation): string {
   if (op.type === 'filter_rows') {
     return `Filtered rows on "${op.column}"`;
   }
+  if (op.type === 'add_row') {
+    return `Appended a new row`;
+  }
+  if (op.type === 'delete_row') {
+    return `Deleted row at index ${op.params.index}`;
+  }
   return `Imputed "${op.column}" using ${op.params.strategy}`;
 }
