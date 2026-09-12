@@ -2,34 +2,541 @@
 @import "tailwindcss";
 @import "leaflet/dist/leaflet.css";
 
-/* Custom cybernetic restyling for Leaflet elements */
+/* ============================================================================
+   ASKDEEPAKAI — MINIMAL GLASS DESIGN SYSTEM
+   ----------------------------------------------------------------------------
+   The UI is themed through tokens rather than per-component overrides. Every
+   surface class already used across the app (bg-slate-900, border-slate-800,
+   bg-[#0b0f19], ...) is remapped here onto a single translucent glass scale, so
+   all 40+ components pick up the theme without being rewritten.
+
+   Surface scale (dark):
+     slate-950  recessed well   — inputs, wells, code blocks
+     slate-900  primary pane    — cards, panels, studios
+     slate-850  soft rim        — hairline dividers
+     slate-800  rim / raised chip
+     slate-700  strong rim      — emphasis edges
+   ========================================================================= */
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* --- Brand accents (indigo namespace maps to AskDeepakAI teal + blue) --- */
+  --color-indigo-50: #e0fbfb;
+  --color-indigo-100: #bbf7f7;
+  --color-indigo-200: #77eeee;
+  --color-indigo-300: #4ce5e5;
+  --color-indigo-350: #3bc8c8;
+  --color-indigo-400: #3bc8c8;
+  --color-indigo-405: #3bc8c8;
+  --color-indigo-500: #2cb2b2;
+  --color-indigo-550: #1b5bd2;
+  --color-indigo-600: #1b5bd2;
+  --color-indigo-650: #1449aa;
+  --color-indigo-700: #0f3885;
+  --color-indigo-800: #0c2b66;
+  --color-indigo-900: #081d45;
+  --color-indigo-950: #061530;
+
+  --color-brand-cyan: #3bc8c8;
+  --color-brand-blue: #1b5bd2;
+  --color-brand-orange: #ef7222;
+  --color-brand-yellow: #dfa435;
+  --color-brand-red: #b22038;
+
+  --color-emerald-300: #57e2e2;
+  --color-emerald-400: #3bc8c8;
+  --color-emerald-405: #3bc8c8;
+  --color-emerald-500: #29bbfd;
+
+  /* --- Glass surface scale ------------------------------------------------
+     Translucent so the ambient backdrop reads through every pane. Opacity
+     modifiers (bg-slate-900/60) compound on top of these base alphas. */
+  --color-slate-950: rgba(6, 9, 16, 0.58);
+  --color-slate-905: rgba(255, 255, 255, 0.06);
+  --color-slate-900: rgba(255, 255, 255, 0.075);
+  --color-slate-850: rgba(255, 255, 255, 0.09);
+  --color-slate-805: rgba(255, 255, 255, 0.12);
+  --color-slate-800: rgba(255, 255, 255, 0.12);
+  --color-slate-755: rgba(255, 255, 255, 0.15);
+  --color-slate-750: rgba(255, 255, 255, 0.15);
+  --color-slate-700: rgba(255, 255, 255, 0.18);
+
+  /* --- Text scale ---------------------------------------------------------
+     The app uses half-steps (slate-450, slate-350, ...) that were never
+     defined, so those classes emitted no CSS at all. Defined here. */
+  --color-slate-205: #e6ecf5;
+  --color-slate-250: #dbe3ef;
+  --color-slate-305: #ccd6e4;
+  --color-slate-350: #b7c3d5;
+  --color-slate-405: #9aa7ba;
+  --color-slate-450: #8f9cb1;
+  --color-slate-455: #8a97ac;
+  --color-slate-505: #7a8698;
+  --color-slate-550: #737f8e;
+  --color-slate-650: #5a6577;
+
+  /* --- Radii: one generous, consistent curve across the product ---------- */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.375rem;
+  --radius-3xl: 1.75rem;
+
+  /* --- Shadows: soft ambient depth, never hard black boxes --------------- */
+  --shadow-2xs: 0 1px 2px rgba(2, 5, 12, 0.16);
+  --shadow-xs: 0 1px 3px rgba(2, 5, 12, 0.20);
+  --shadow-sm: 0 2px 8px -2px rgba(2, 5, 12, 0.24);
+  --shadow-md: 0 6px 18px -6px rgba(2, 5, 12, 0.32);
+  --shadow-lg: 0 14px 34px -14px rgba(2, 5, 12, 0.42);
+  --shadow-xl: 0 22px 48px -20px rgba(2, 5, 12, 0.48);
+  --shadow-2xl: 0 30px 70px -28px rgba(2, 5, 12, 0.55);
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Glass engine */
+  --glass-blur: 18px;
+  --glass-blur-strong: 30px;
+  --glass-saturate: 145%;
+  --glass-rim: rgba(255, 255, 255, 0.10);
+  --glass-rim-soft: rgba(255, 255, 255, 0.06);
+  --glass-highlight: rgba(255, 255, 255, 0.14);
+  --glass-fill: rgba(255, 255, 255, 0.055);
+  --glass-fill-strong: rgba(255, 255, 255, 0.085);
+  --glass-well: rgba(5, 8, 14, 0.42);
+
+  --canvas: #070910;
+  --ink: #e8eef7;
+}
+
+/* ============================================================================
+   1 — AMBIENT CANVAS
+   Glass only reads as glass when there is something behind it. A calm,
+   slow aurora field replaces the previous flat black.
+   ========================================================================= */
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  background-color: var(--canvas);
+  background-image:
+    radial-gradient(1100px 760px at 8% -12%, rgba(27, 91, 210, 0.22), transparent 62%),
+    radial-gradient(920px 680px at 92% -4%, rgba(59, 200, 200, 0.15), transparent 58%),
+    radial-gradient(1000px 900px at 50% 112%, rgba(59, 200, 200, 0.09), transparent 60%),
+    radial-gradient(700px 600px at 78% 68%, rgba(27, 91, 210, 0.10), transparent 60%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Fine grain keeps large translucent planes from banding. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+
+::selection {
+  background: rgba(59, 200, 200, 0.24);
+  color: #ffffff;
+}
+
+/* Thin, unobtrusive scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+  background-clip: content-box;
+}
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* ============================================================================
+   2 — GLASS SURFACE ENGINE
+   Panels are identified structurally (a translucent surface class + a panel
+   radius) and given backdrop blur, a hairline rim and a top highlight.
+   ========================================================================= */
+
+.glass,
+.glass-strong,
+:is(
+  [class*="bg-slate-9"],
+  [class*="bg-slate-85"],
+  [class*="bg-slate-80"],
+  [class*="bg-slate-70"]
+):is(
+  [class*="rounded-lg"],
+  [class*="rounded-xl"],
+  [class*="rounded-2xl"],
+  [class*="rounded-3xl"]
+) {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+}
+
+/* Hand-applied glass utilities for surfaces authored directly in components. */
+.glass {
+  background-color: var(--glass-fill);
+  border: 1px solid var(--glass-rim);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-lg);
+}
+
+.glass-strong {
+  background-color: var(--glass-fill-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-rim);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-xl);
+}
+
+.glass-well {
+  background-color: var(--glass-well);
+  border: 1px solid var(--glass-rim-soft);
+  border-radius: var(--radius-lg);
+}
+
+/* A single specular hairline along the top edge — the cue that reads as
+   "pane of glass" without any additional chrome. */
+.glass-rim {
+  position: relative;
+}
+.glass-rim::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--glass-highlight) 22%,
+    var(--glass-highlight) 78%,
+    transparent
+  );
+  pointer-events: none;
+}
+
+/* --- Legacy arbitrary-hex surfaces --------------------------------------
+   Dozens of components hardcode dark hex panels. Matching the raw class
+   attribute (case-insensitive) folds them into the same glass scale without
+   editing every file. Brand-colored surfaces are deliberately excluded. */
+:is(
+  [class*="bg-[#0b0f19]" i], [class*="bg-[#0b0e17]" i], [class*="bg-[#070a13]" i],
+  [class*="bg-[#0f1524]" i], [class*="bg-[#0d1322]" i], [class*="bg-[#060a10]" i],
+  [class*="bg-[#111625]" i], [class*="bg-[#131b2e]" i], [class*="bg-[#151c30]" i],
+  [class*="bg-[#0e1325]" i], [class*="bg-[#0b1221]" i], [class*="bg-[#1a233c]" i],
+  [class*="bg-[#1a1a2e]" i], [class*="bg-[#141b2e]" i], [class*="bg-[#121c32]" i],
+  [class*="bg-[#121b2a]" i], [class*="bg-[#121927]" i], [class*="bg-[#0f1526]" i],
+  [class*="bg-[#0d162d]" i], [class*="bg-[#0d1220]" i], [class*="bg-[#0c1428]" i],
+  [class*="bg-[#0a0f1d]" i], [class*="bg-[#0e121e]" i], [class*="bg-[#0c111c]" i],
+  [class*="bg-[#0b1220]" i], [class*="bg-[#0a0d14]" i], [class*="bg-[#090e19]" i],
+  [class*="bg-[#090d17]" i], [class*="bg-[#080d1a]" i], [class*="bg-[#080d19]" i],
+  [class*="bg-[#070b16]" i], [class*="bg-[#070b14]" i], [class*="bg-[#070b13]" i],
+  [class*="bg-[#06080c]" i], [class*="bg-[#050a10]" i], [class*="bg-[#050811]" i],
+  [class*="bg-[#07090e]" i], [class*="bg-[#0a0d16]" i], [class*="bg-[#090b12]" i],
+  [class*="bg-[#0e1422]" i], [class*="bg-[#0e162a]" i], [class*="bg-[#12192a]" i],
+  [class*="bg-[#0a0f1d]" i], [class*="bg-[#0b0e17]" i]
+) {
+  background-color: var(--glass-fill) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-color: var(--glass-rim);
+}
+
+/* Monospace consoles stay recessed rather than raised — a terminal should read
+   as a cut-out in the glass, not another pane floating above it. */
+:is([class*="bg-[#090d16]" i], [class*="bg-[#06080c]" i]).font-mono,
+pre, code {
+  background-color: var(--glass-well) !important;
+}
+
+/* ============================================================================
+   3 — MINIMAL INTERACTION LANGUAGE
+   Restrained motion, one accent, clear focus. Replaces the previous neon
+   glow + hard scale-punch feedback.
+   ========================================================================= */
+
+#workstation_app *,
+button,
+a,
+[role="button"] {
+  transition-property: background-color, border-color, color, box-shadow, transform, opacity, backdrop-filter;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  transition-duration: 200ms;
+}
+
+button:active,
+a:active,
+[role="button"]:active {
+  transform: translateY(0.5px) scale(0.985);
+}
+
+:is(button, a, [role="button"], input, select, textarea):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 1px rgba(7, 9, 16, 0.9),
+    0 0 0 3px rgba(59, 200, 200, 0.55);
+  border-radius: inherit;
+}
+
+/* Inputs read as recessed glass wells. */
+input,
+select,
+textarea {
+  background-color: var(--glass-well);
+  border-color: var(--glass-rim);
+  color: var(--ink);
+}
+input::placeholder,
+textarea::placeholder {
+  color: rgba(232, 238, 247, 0.38);
+}
+select option {
+  background-color: #0b0f19;
+  color: #e8eef7;
+}
+
+/* Tables: hairline rules only, no boxed cells. */
+table {
+  border-color: var(--glass-rim-soft);
+}
+table th {
+  background-color: rgba(255, 255, 255, 0.04);
+  color: #dbe3ef;
+  font-weight: 600;
+}
+table tr,
+table td,
+table th {
+  border-color: var(--glass-rim-soft);
+}
+table tr:hover td {
+  background-color: rgba(255, 255, 255, 0.035);
+}
+
+hr {
+  border-color: var(--glass-rim-soft);
+}
+
+/* Dashed dropzones */
+.border-dashed {
+  border-color: var(--glass-rim);
+}
+.border-dashed:hover {
+  border-color: rgba(59, 200, 200, 0.45);
+  background-color: rgba(59, 200, 200, 0.04);
+}
+
+/* ============================================================================
+   4 — LIGHT THEME
+   The same glass system inverted: white panes over a pale aurora. Achieved by
+   re-pointing the tokens rather than forcing opaque overrides.
+   ========================================================================= */
+
+body:has(.light) {
+  --canvas: #eef2f8;
+  background-color: var(--canvas);
+  background-image:
+    radial-gradient(1100px 760px at 8% -12%, rgba(27, 91, 210, 0.16), transparent 62%),
+    radial-gradient(920px 680px at 92% -4%, rgba(59, 200, 200, 0.16), transparent 58%),
+    radial-gradient(1000px 900px at 50% 112%, rgba(27, 91, 210, 0.08), transparent 60%);
+}
+body:has(.light)::before {
+  opacity: 0.35;
+  background-image: radial-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+}
+
+.light {
+  color-scheme: light;
+
+  --glass-rim: rgba(15, 23, 42, 0.10);
+  --glass-rim-soft: rgba(15, 23, 42, 0.07);
+  --glass-highlight: rgba(255, 255, 255, 0.9);
+  --glass-fill: rgba(255, 255, 255, 0.62);
+  --glass-fill-strong: rgba(255, 255, 255, 0.78);
+  --glass-well: rgba(255, 255, 255, 0.82);
+  --ink: #101828;
+
+  color: var(--ink);
+
+  /* Surfaces */
+  --color-slate-950: rgba(255, 255, 255, 0.80);
+  --color-slate-905: rgba(255, 255, 255, 0.62);
+  --color-slate-900: rgba(255, 255, 255, 0.66);
+  --color-slate-850: rgba(15, 23, 42, 0.08);
+  --color-slate-805: rgba(15, 23, 42, 0.10);
+  --color-slate-800: rgba(15, 23, 42, 0.10);
+  --color-slate-755: rgba(15, 23, 42, 0.13);
+  --color-slate-750: rgba(15, 23, 42, 0.13);
+  --color-slate-700: rgba(15, 23, 42, 0.15);
+
+  /* Text — the same steps flip to dark ink for legibility on light glass. */
+  --color-slate-100: #0d1526;
+  --color-slate-200: #101a2e;
+  --color-slate-205: #16203a;
+  --color-slate-250: #1b2438;
+  --color-slate-300: #1e293b;
+  --color-slate-305: #24304a;
+  --color-slate-350: #33415c;
+  --color-slate-400: #475569;
+  --color-slate-405: #4a5872;
+  --color-slate-450: #51607a;
+  --color-slate-455: #55637d;
+  --color-slate-500: #60708a;
+  --color-slate-505: #647490;
+  --color-slate-550: #6a7994;
+  --color-slate-600: #6b7a90;
+  --color-slate-650: #74839a;
+}
+
+.light input::placeholder,
+.light textarea::placeholder {
+  color: rgba(16, 24, 40, 0.42);
+}
+.light select option {
+  background-color: #ffffff;
+  color: #0f172a;
+}
+.light table th {
+  background-color: rgba(15, 23, 42, 0.04);
+  color: #0f172a;
+}
+.light table tr:hover td {
+  background-color: rgba(15, 23, 42, 0.03);
+}
+
+/* Typography safety net: element+class specificity darkens inherited
+   `text-white` / light utility text inside light glass. */
+.light :is(h1, h2, h3, h4, h5, h6, label, legend) {
+  color: #0d1526;
+}
+.light :is(p, li, blockquote, td) {
+  color: #1e293b;
+}
+.light span {
+  color: #2b3852;
+}
+
+/* ...except on solid accent surfaces, where white text is correct. */
+.light :is(
+  [class*="bg-indigo-5"], [class*="bg-indigo-6"], [class*="bg-indigo-7"],
+  [class*="bg-blue-6"], [class*="bg-emerald-5"], [class*="bg-emerald-6"],
+  [class*="bg-amber-6"], [class*="bg-rose-6"], [class*="bg-red-6"],
+  [class*="bg-[#1b5bd2]" i], [class*="bg-[#1449aa]" i]
+) :is(span, p, h1, h2, h3, h4, h5, h6, label, li, strong, small) {
+  color: #ffffff;
+}
+
+/* Deliberately colored metric cards keep their identity in both themes. */
+.light [class*="bg-[#051c12]" i] { background-color: #04160e !important; }
+.light [class*="bg-[#051c12]" i] * { color: #a7f3d0 !important; }
+.light [class*="bg-[#1f070b]" i] { background-color: #1a0507 !important; }
+.light [class*="bg-[#1f070b]" i] * { color: #fecaca !important; }
+
+.light pre,
+.light code,
+.light :is([class*="bg-[#090d16]" i]).font-mono {
+  background-color: rgba(9, 13, 22, 0.92) !important;
+  color: #cbd5e1 !important;
+}
+
+/* ============================================================================
+   5 — TYPOGRAPHY & LAYOUT SAFETY (preserved behaviour)
+   ========================================================================= */
+
+p, span, select, option, td, blockquote, font {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+h1, h2, h3, h4, h5, h6, th, button, label {
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+h1, h2, h3, h4 {
+  letter-spacing: -0.015em;
+}
+
+.recharts-responsive-container {
+  max-width: 100% !important;
+}
+
+/* ============================================================================
+   6 — LEAFLET (glass-matched)
+   ========================================================================= */
+
 .leaflet-container {
-  background: #070b16 !important;
+  background: transparent !important;
   font-family: inherit !important;
 }
 
 .leaflet-bar {
-  border: 1px solid #1e293b !important;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
+  border: 1px solid var(--glass-rim) !important;
+  border-radius: var(--radius-lg) !important;
+  overflow: hidden;
+  box-shadow: var(--shadow-md) !important;
 }
 
 .leaflet-bar a {
-  background-color: #0b0f19 !important;
+  background-color: var(--glass-fill) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
   color: #3bc8c8 !important;
-  border-bottom: 1px solid #1e293b !important;
+  border-bottom: 1px solid var(--glass-rim-soft) !important;
 }
 
 .leaflet-bar a:hover {
-  background-color: #141b2d !important;
-  color: #ffffff !important;
+  background-color: var(--glass-fill-strong) !important;
 }
 
-.leaflet-popup-content-wrapper, .leaflet-popup-tip {
-  background: #090d16 !important;
-  border: 1px solid rgba(59, 200, 200, 0.3) !important;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8) !important;
-  color: #f1f5f9 !important;
-  border-radius: 12px !important;
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--glass-fill-strong) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-rim) !important;
+  box-shadow: var(--shadow-xl) !important;
+  color: var(--ink) !important;
+  border-radius: var(--radius-xl) !important;
 }
 
 .leaflet-popup-content {
@@ -37,691 +544,70 @@
   padding: 0 !important;
 }
 
-@theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Outfit", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-
-  /* Accent mapping of indigo to the bright AskDeepakAI teal-cyan and dark-blue branding */
-  --color-indigo-50: #e0fbfb;
-  --color-indigo-100: #bbf7f7;
-  --color-indigo-200: #77eeee;
-  --color-indigo-300: #4ce5e5;
-  --color-indigo-350: #3bc8c8;
-  --color-indigo-400: #3bc8c8; /* Main Teal-Cyan logo color */
-  --color-indigo-405: #3bc8c8;
-  --color-indigo-500: #2cb2b2;
-  --color-indigo-550: #1b5bd2; /* Dark Blue logo color */
-  --color-indigo-600: #1b5bd2; /* Buttons & primary triggers using Dark Blue */
-  --color-indigo-650: #1449aa; /* Darker blue state */
-  --color-indigo-700: #0f3885;
-  --color-indigo-800: #0c2b66;
-  --color-indigo-900: #081d45;
-  --color-indigo-950: #061530;
-
-  /* Custom brand colors for further components if needed */
-  --color-brand-cyan: #3bc8c8;
-  --color-brand-blue: #1b5bd2;
-  --color-brand-orange: #ef7222;
-  --color-brand-yellow: #dfa435;
-  --color-brand-red: #b22038;
-
-  /* Map emerald classes to high-vibrancy teal for state sync */
-  --color-emerald-300: #57e2e2;
-  --color-emerald-400: #3bc8c8;
-  --color-emerald-500: #29bbfd;
-}
-
-/* Prevent layout breakouts and text overflow box issues globally across all dynamic pages */
-body, html {
-  max-width: 100vw;
-  overflow-x: hidden;
-  background-color: #07090E !important;
-}
-
-/* Ensure long words and dynamic labels wrap securely without overflowing container walls */
-p, span, select, option, td, blockquote, font {
-  word-break: break-word;
-  overflow-wrap: break-word;
-  word-wrap: break-word;
-}
-
-/* Ensure headings, inputs, parameters, and action text are always horizontal and never wrap vertically */
-h1, h2, h3, h4, h5, h6, th, button, label {
-  word-break: keep-all;
-  overflow-wrap: normal;
-  word-wrap: normal;
-  white-space: normal;
-}
-
-/* Flexible and responsive charts */
-.recharts-responsive-container {
-  max-width: 100% !important;
-}
-
-/* --- Crazy 3D Live Assistive Touch Logo Animations --- */
+/* ============================================================================
+   7 — MOTION
+   The 3D brand mark keeps its character; the ambient neon pulse is retired in
+   favour of a quiet breathing rim.
+   ========================================================================= */
 
 @keyframes live-3d-spin {
-  0% {
-    transform: perspective(600px) rotateY(0deg) rotateX(20deg) rotateZ(0deg);
-  }
-  50% {
-    transform: perspective(600px) rotateY(180deg) rotateX(-20deg) rotateZ(15deg);
-  }
-  100% {
-    transform: perspective(600px) rotateY(360deg) rotateX(20deg) rotateZ(360deg);
-  }
+  0%   { transform: perspective(600px) rotateY(0deg) rotateX(20deg) rotateZ(0deg); }
+  50%  { transform: perspective(600px) rotateY(180deg) rotateX(-20deg) rotateZ(15deg); }
+  100% { transform: perspective(600px) rotateY(360deg) rotateX(20deg) rotateZ(360deg); }
 }
-
 @keyframes live-ring-1 {
-  0% {
-    transform: perspective(600px) rotateX(70deg) rotateY(0deg) rotateZ(0deg);
-  }
-  100% {
-    transform: perspective(600px) rotateX(70deg) rotateY(0deg) rotateZ(360deg);
-  }
+  0%   { transform: perspective(600px) rotateX(70deg) rotateY(0deg) rotateZ(0deg); }
+  100% { transform: perspective(600px) rotateX(70deg) rotateY(0deg) rotateZ(360deg); }
 }
-
 @keyframes live-ring-2 {
-  0% {
-    transform: perspective(600px) rotateX(-45deg) rotateY(0deg) rotateZ(360deg);
-  }
-  100% {
-    transform: perspective(600px) rotateX(-45deg) rotateY(0deg) rotateZ(0deg);
-  }
+  0%   { transform: perspective(600px) rotateX(-45deg) rotateY(0deg) rotateZ(360deg); }
+  100% { transform: perspective(600px) rotateX(-45deg) rotateY(0deg) rotateZ(0deg); }
 }
-
 @keyframes live-ring-3 {
-  0% {
-    transform: perspective(600px) rotateX(20deg) rotateY(70deg) rotateZ(0deg);
-  }
-  100% {
-    transform: perspective(600px) rotateX(20deg) rotateY(70deg) rotateZ(360deg);
-  }
+  0%   { transform: perspective(600px) rotateX(20deg) rotateY(70deg) rotateZ(0deg); }
+  100% { transform: perspective(600px) rotateX(20deg) rotateY(70deg) rotateZ(360deg); }
 }
 
-@keyframes neon-breath-glowing {
+@keyframes glass-breath {
   0%, 100% {
-    box-shadow: 0 0 10px #3bc8c850, inset 0 0 5px #3bc8c830;
-    border-color: rgba(59, 200, 200, 0.4);
+    border-color: rgba(255, 255, 255, 0.10);
+    box-shadow: 0 0 0 0 rgba(59, 200, 200, 0.00);
   }
   50% {
-    box-shadow: 0 0 25px #1b5bd280, inset 0 0 10px #1b5bd250;
-    border-color: rgba(27, 91, 210, 0.8);
+    border-color: rgba(59, 200, 200, 0.34);
+    box-shadow: 0 0 0 4px rgba(59, 200, 200, 0.06);
   }
 }
 
 @keyframes shiny-sheen {
-  0% {
-    left: -150%;
-  }
-  50% {
-    left: 150%;
-  }
-  100% {
-    left: 150%;
-  }
+  0%   { left: -150%; }
+  55%  { left: 150%; }
+  100% { left: 150%; }
 }
 
 @keyframes quantum-orbit-pulsar {
-  0% {
-    transform: scale(0.9) rotate(0deg);
-    opacity: 0.5;
+  0%   { transform: scale(0.94) rotate(0deg); opacity: 0.35; }
+  50%  { transform: scale(1.06) rotate(180deg); opacity: 0.6; }
+  100% { transform: scale(0.94) rotate(360deg); opacity: 0.35; }
+}
+
+.animate-live-3d-spin { animation: live-3d-spin 8s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+.animate-live-ring-1 { animation: live-ring-1 6s linear infinite; }
+.animate-live-ring-2 { animation: live-ring-2 5s linear infinite; }
+.animate-live-ring-3 { animation: live-ring-3 7s linear infinite; }
+.animate-neon-breath { animation: glass-breath 5s ease-in-out infinite; }
+.animate-shiny-sheen { animation: shiny-sheen 4.5s ease-in-out infinite; }
+.animate-quantum-pulsar { animation: quantum-orbit-pulsar 5s ease-in-out infinite; }
+
+.preserve-3d { transform-style: preserve-3d; }
+.backface-hidden { backface-visibility: hidden; }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
   }
-  50% {
-    transform: scale(1.1) rotate(180deg);
-    opacity: 0.9;
-  }
-  100% {
-    transform: scale(0.9) rotate(360deg);
-    opacity: 0.5;
-  }
 }
-
-.animate-live-3d-spin {
-  animation: live-3d-spin 8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-
-.animate-live-ring-1 {
-  animation: live-ring-1 6s linear infinite;
-}
-
-.animate-live-ring-2 {
-  animation: live-ring-2 5s linear infinite;
-}
-
-.animate-live-ring-3 {
-  animation: live-ring-3 7s linear infinite;
-}
-
-.animate-neon-breath {
-  animation: neon-breath-glowing 3.5s ease-in-out infinite;
-}
-
-.animate-shiny-sheen {
-  animation: shiny-sheen 3s ease-in-out infinite;
-}
-
-.animate-quantum-pulsar {
-  animation: quantum-orbit-pulsar 4s ease-in-out infinite;
-}
-
-.preserve-3d {
-  transform-style: preserve-3d;
-}
-
-.backface-hidden {
-  backface-visibility: hidden;
-}
-
-/* --- Light Mode Aesthetics & Overrides --- */
-.light {
-  background-color: #f8fafc !important;
-  color: #0d121d !important;
-}
-
-/* Base Workstation and Main Container Background Map */
-.light,
-.light #workstation_app,
-.light .bg-\[\#07090E\],
-.light .bg-\[\#07090E\]\/90,
-.light .bg-slate-950,
-.light .bg-slate-950\/95,
-.light .bg-slate-900,
-.light .bg-slate-900\/50,
-.light .bg-\[\#050811\]\/95,
-.light .bg-\[\#070b16\],
-.light .bg-\[\#090e19\]\/90 {
-  background-color: #f8fafc !important;
-  color: #0d121d !important;
-}
-
-/* Sidebar and Stage Tracker Navigation Panelling (Beautiful Soft Cool Gray) */
-.light aside,
-.light .bg-\[\#0A0D16\],
-.light .bg-\[\#090B12\]\/80,
-.light .bg-slate-900\/60,
-.light .bg-slate-900\/80,
-.light .bg-slate-950\/40 {
-  background-color: #f1f5f9 !important;
-  border-color: #cbd5e1 !important;
-}
-
-/* Main Cards, Modeling Studios & All Custom Stage Container Backgrounds Map to Perfect White Spaces */
-.light .bg-\[\#0B0F19\],
-.light .bg-\[\#0B0F19\]\/90,
-.light .bg-\[\#0C111C\],
-.light .bg-\[\#0C111C\]\/65,
-.light .bg-\[\#0B1220\],
-.light .bg-\[\#080d19\],
-.light .bg-\[\#0e1422\]\/90,
-.light .bg-\[\#0A0F1D\]\/95,
-.light .bg-\[\#0e162a\]\/95,
-.light .bg-\[\#0E1325\]\/85,
-.light .bg-\[\#0E121E\],
-.light .bg-\[\#0b0f19\],
-.light .bg-\[\#0d162d\],
-.light .bg-\[\#080d1a\],
-.light .bg-\[\#0c1428\]\/95,
-.light .bg-\[\#0d1322\]\/50,
-.light .bg-\[\#121c32\],
-.light .bg-\[\#0f1526\],
-.light .bg-\[\#111625\],
-.light .bg-\[\#0c111c\],
-.light .bg-\[\#0B0E17\],
-.light .bg-slate-800,
-.light .bg-slate-850,
-.light .bg-slate-900\/40,
-.light .bg-slate-900\/70,
-.light .bg-slate-900\/90 {
-  background-color: #ffffff !important;
-  border-color: #cbd5e1 !important;
-  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.05), 0 8px 10px -6px rgba(15, 23, 42, 0.03), 0 0 0 1px rgba(15, 23, 42, 0.04) !important;
-}
-
-/* Data Tables, Table Rows, and Alignment Grid Elements */
-.light .grid > div,
-.light table {
-  border-color: #cbd5e1 !important;
-}
-.light table tr,
-.light table th,
-.light table td {
-  border-color: #cbd5e1 !important;
-  color: #1e293b !important;
-}
-.light table th {
-  background-color: #f1f5f9 !important;
-  color: #0f172a !important;
-}
-.light table tr:hover td {
-  background-color: #f8fafc !important;
-}
-
-/* User Input, Select Options and Text Field Focus Mappings (Highly clear and accessible bounds) */
-.light input,
-.light select,
-.light textarea,
-.light .bg-\[\#060A10\]\/95,
-.light .bg-\[\#111625\] select,
-.light .bg-\[\#111625\] input {
-  background-color: #ffffff !important;
-  color: #0f172a !important;
-  border: 1px solid #cbd5e1 !important;
-}
-.light input::placeholder,
-.light select::placeholder,
-.light textarea::placeholder {
-  color: #64748b !important;
-}
-.light select option {
-  background-color: #ffffff !important;
-  color: #0f172a !important;
-}
-
-/* Sidebar stage indicators - Active Stage Navigation highlights */
-.light .bg-gradient-to-r.from-indigo-600\/20,
-.light .bg-indigo-600\/10 {
-  background-image: linear-gradient(to right, rgba(27, 91, 210, 0.12), rgba(27, 91, 210, 0.02)) !important;
-  background-color: transparent !important;
-  border-left-width: 3px !important;
-  border-left-color: #1b5bd2 !important;
-  color: #1b5bd2 !important;
-}
-.light .bg-gradient-to-r.from-indigo-600\/20 *,
-.light .bg-indigo-600\/10 * {
-  color: #1b5bd2 !important;
-}
-
-/* Dynamic Advisory Cards (E.g. Analyst Guidance Sidebar box) */
-.light .bg-\[\#12192A\]\/70 {
-  background-color: #ffffff !important;
-  border: 1px solid rgba(27, 91, 210, 0.18) !important;
-}
-.light .bg-\[\#12192A\]\/70 * {
-  color: #1e293b !important;
-}
-.light .bg-\[\#12192A\]\/70 .text-indigo-400 {
-  color: #1b5bd2 !important;
-}
-
-/* Ingestion files Upload Box state behaviors */
-.light .border-dashed {
-  border-color: #cbd5e1 !important;
-  background-color: #ffffff !important;
-}
-.light .border-dashed:hover {
-  border-color: #1b5bd2 !important;
-  background-color: rgba(27, 91, 210, 0.02) !important;
-}
-
-/* General Typography & Headers Color Correction (Extremely clear dark text in white/light spaces) */
-.light h1, .light h2, .light h3, .light h4, .light h5, .light h6, .light label, .light legend {
-  color: #0f172a !important;
-}
-.light p,
-.light li,
-.light blockquote,
-.light td {
-  color: #1e293b !important;
-}
-.light span {
-  color: #2e3a52 !important;
-}
-
-/* Override standard dark-grey tailwind text classes to highly legible dark colors */
-.light .text-slate-50,
-.light .text-slate-100,
-.light .text-slate-200,
-.light .text-slate-300,
-.light .text-slate-400,
-.light .text-slate-450 {
-  color: #1e293b !important;
-}
-.light .text-slate-550,
-.light .text-slate-500,
-.light .text-slate-650 {
-  color: #475569 !important;
-}
-
-/* Ensure secondary button elements have light hover transitions */
-.light button.border-slate-800,
-.light button.border-slate-700\/50,
-.light .border-slate-800,
-.light .border-slate-800\/60,
-.light .border-slate-800\/80,
-.light .border-slate-700\/35,
-.light .border-slate-700\/50,
-.light .border-slate-900 {
-  border-color: #cbd5e1 !important;
-}
-.light button:hover {
-  background-color: #f1f5f9 !important;
-  border-color: #94a3b8 !important;
-}
-
-/* Social Connection and secondary cards profile dialog alignments */
-.light .bg-\[\#0f1524\],
-.light .bg-\[\#151c30\] {
-  background-color: #f1f5f9 !important;
-  border-color: #cbd5e1 !important;
-}
-.light .bg-\[\#0f1524\]:hover,
-.light .bg-\[\#151c30\]:hover {
-  background-color: #e2e8f0 !important;
-}
-.light .bg-\[\#080d19\] {
-  background-color: #f8fafc !important;
-  border-color: #cbd5e1 !important;
-}
-
-/* Active connection states mapping */
-.light .bg-\[\#121B2A\]\/90 {
-  background-color: #ffffff !important;
-  border: 1px solid #10b981 !important;
-}
-.light .bg-\[\#121B2A\]\/90 .text-emerald-300 {
-  color: #059669 !important;
-}
-
-/* Floating AI Chat Assistive Touch Bot adjustments */
-.light .bg-\[\#070B14\]\/45,
-.light .bg-\[\#0a0f1d\],
-.light .bg-\[\#090D17\],
-.light .bg-\[\#0A0F1D\]\/95,
-.light .bg-\[\#0e162a\]\/95 {
-  background-color: #f8fafc !important;
-  border-color: #cbd5e1 !important;
-}
-.light .bg-\[\#070A13\] {
-  background-color: #e2e8f0 !important;
-  border-color: #cbd5e1 !important;
-}
-.light #chat_suggestions button {
-  background-color: #ffffff !important;
-  color: #1e293b !important;
-  border: 1px solid #cbd5e1 !important;
-  cursor: pointer;
-}
-.light #chat_suggestions button:hover {
-  background-color: #f1f5f9 !important;
-  border-color: #1b5bd2 !important;
-}
-
-/* Sparkles indicators or secondary labels overrides */
-.light .text-amber-500 {
-  color: #d97706 !important;
-}
-
-/* ==========================================
-   SOLID DARK WINDOWS & KEEP-DARK BOX PRESERVES 
-   (Ensures white / high-visibility text inside solid colored boxes and dark badges in light mode)
-   ========================================== */
-
-/* 1. Solid Accent Triggers (E.g. Primary action buttons, dark pills, and brand highlights) */
-.light .bg-indigo-600,
-.light .bg-indigo-650,
-.light .bg-indigo-600 *,
-.light .bg-indigo-650 *,
-.light .bg-indigo-550,
-.light .bg-indigo-550 *,
-.light .bg-indigo-500,
-.light .bg-indigo-500 *,
-.light .bg-\[\#1b5bd2\],
-.light .bg-\[\#1b5bd2\] *,
-.light .bg-indigo-700,
-.light .bg-indigo-700 *,
-.light .bg-\[\#1449aa\],
-.light .bg-\[\#1449aa\] *,
-.light .bg-emerald-600,
-.light .bg-emerald-600 *,
-.light .bg-blue-600,
-.light .bg-blue-600 *,
-.light .bg-emerald-500,
-.light .bg-emerald-500 * {
-  color: #ffffff !important;
-}
-
-/* 2. Accuracy Green metrics card (Remains beautiful dark green with bright mint text) */
-.light .bg-\[\#051C12\] {
-  background-color: #051a11 !important;
-  border-color: rgba(16, 185, 129, 0.2) !important;
-}
-.light .bg-\[\#051C12\] * {
-  color: #a7f3d0 !important; /* Pastel bright mint */
-}
-.light .bg-\[\#051C12\] .text-3xl {
-  color: #10b981 !important; /* Highly legibile high-contrast green */
-}
-
-/* 3. Loss Red metrics card (Remains deep crimson with clear pastel red text) */
-.light .bg-\[\#1F070B\] {
-  background-color: #1c0508 !important;
-  border-color: rgba(239, 68, 68, 0.2) !important;
-}
-.light .bg-\[\#1F070B\] * {
-  color: #fecaca !important; /* Pastel light red text */
-}
-.light .bg-\[\#1F070B\] .text-3xl {
-  color: #ef4444 !important; /* High-contrast bright red warning */
-}
-
-/* 4. Neural Network layers layer config block retains pristine technical dark-contrast layout */
-.light .bg-\[\#090D16\].font-mono,
-.light .bg-\[\#090D16\].font-mono * {
-  background-color: #080c14 !important;
-  color: #cbd5e1 !important;
-  border-color: #1e293b !important;
-}
-
-/* 5. Pipeline Terminal console window log streams retain custom dark terminal focus */
-.light .bg-slate-900.text-emerald-400,
-.light .bg-slate-900.text-emerald-400 * {
-  background-color: #06090e !important;
-  color: #10b981 !important;
-  border-color: rgba(59, 200, 200, 0.15) !important;
-}
-
-/* 6. Preservation of any specific accent texts, statuses, and custom highlights */
-.light .text-teal-400,
-.light .text-emerald-405,
-.light .text-emerald-400,
-.light .text-amber-400,
-.light .text-rose-450,
-.light .text-rose-400,
-.light .text-[#3bc8c8],
-.light .text-[#1a2e4c] {
-  /* Let these custom color classes pass untouched to preserve essential visual guidance */
-}
-
-/* Dynamic transition timing overrides */
-#workstation_app *,
-button,
-a,
-[role="button"] {
-  transition-property: background-color, border-color, text-decoration-color, box-shadow, transform, opacity, filter;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 180ms;
-}
-
-/* Tactile Active Click/Pressed State Feedback Core */
-button:active,
-a:active,
-[role="button"]:active {
-  transform: scale(0.95) !important;
-  filter: brightness(0.9) !important;
-  opacity: 0.92;
-}
-
-/* Subtle glowing pulse when hover over buttons or clickable elements */
-button:hover,
-[role="button"]:hover {
-  filter: brightness(1.05);
-}
-
-/* ==========================================
-   TRANSPARENT STAGES WINDOWS & BLURS OVERRIDE 
-   (Makes all boxes in all stages beautifully transparent so the background logo stands out)
-   ========================================= */
-
-#uploader_module .bg-slate-900\/60,
-#uploader_module .bg-slate-905\/40,
-#uploader_module .bg-slate-950\/40,
-#uploader_module .bg-slate-900\/40,
-#uploader_module .bg-slate-950\/20,
-#uploader_module .bg-slate-950\/50,
-#uploader_module .bg-slate-950\/60,
-#uploader_module .bg-slate-950\/70,
-#uploader_module .bg-slate-950\/80,
-#uploader_module .bg-slate-950\/30,
-#uploader_module .bg-slate-900\/50,
-#uploader_module .bg-\[\#0b0f19\],
-
-#cleaning_module .bg-slate-900\/60,
-#cleaning_module .bg-slate-950\/40,
-#cleaning_module .bg-slate-900\/40,
-#cleaning_module .bg-slate-950\/20,
-#cleaning_module .bg-slate-950\/50,
-#cleaning_module .bg-slate-950\/60,
-#cleaning_module .bg-slate-950\/70,
-#cleaning_module .bg-slate-950\/80,
-#cleaning_module .bg-slate-950\/30,
-#cleaning_module .bg-slate-900\/50,
-#cleaning_module .bg-\[\#0b0f19\],
-
-#eda_interactive_workspace .bg-slate-900\/60,
-#eda_interactive_workspace .bg-slate-950\/40,
-#eda_interactive_workspace .bg-slate-900\/40,
-#eda_interactive_workspace .bg-slate-950\/20,
-#eda_interactive_workspace .bg-slate-950\/50,
-#eda_interactive_workspace .bg-slate-950\/60,
-#eda_interactive_workspace .bg-slate-950\/70,
-#eda_interactive_workspace .bg-slate-950\/80,
-#eda_interactive_workspace .bg-slate-950\/30,
-#eda_interactive_workspace .bg-slate-900\/50,
-#eda_interactive_workspace .bg-\[\#0b0f19\],
-
-#ml_module .bg-slate-900\/60,
-#ml_module .bg-slate-950\/40,
-#ml_module .bg-slate-900\/40,
-#ml_module .bg-slate-950\/20,
-#ml_module .bg-slate-950\/50,
-#ml_module .bg-slate-950\/60,
-#ml_module .bg-slate-950\/70,
-#ml_module .bg-slate-950\/80,
-#ml_module .bg-slate-950\/30,
-#ml_module .bg-slate-900\/50,
-#ml_module .bg-\[\#0b0f19\],
-
-#dashboard_module_upgraded .bg-slate-900\/60,
-#dashboard_module_upgraded .bg-slate-950\/40,
-#dashboard_module_upgraded .bg-slate-900\/40,
-#dashboard_module_upgraded .bg-slate-950\/20,
-#dashboard_module_upgraded .bg-slate-950\/50,
-#dashboard_module_upgraded .bg-slate-950\/60,
-#dashboard_module_upgraded .bg-slate-950\/70,
-#dashboard_module_upgraded .bg-slate-950\/80,
-#dashboard_module_upgraded .bg-slate-950\/30,
-#dashboard_module_upgraded .bg-slate-900\/50,
-#dashboard_module_upgraded .bg-\[\#0b0f19\],
-
-#unified_strategy_workspace .bg-slate-900\/60,
-#unified_strategy_workspace .bg-slate-950\/40,
-#unified_strategy_workspace .bg-slate-900\/40,
-#unified_strategy_workspace .bg-slate-950\/20,
-#unified_strategy_workspace .bg-slate-950\/50,
-#unified_strategy_workspace .bg-slate-950\/60,
-#unified_strategy_workspace .bg-slate-950\/70,
-#unified_strategy_workspace .bg-slate-950\/80,
-#unified_strategy_workspace .bg-slate-950\/30,
-#unified_strategy_workspace .bg-slate-900\/50,
-#unified_strategy_workspace .bg-\[\#0b0f19\],
-
-#live_strategic_report_page,
-#python_sandbox_dock,
-#reports_hub_terminal {
-  background-color: rgba(10, 13, 23, 0.05) !important;
-  backdrop-filter: blur(2px) !important;
-  border-color: rgba(148, 163, 184, 0.12) !important;
-}
-
-.light #uploader_module .bg-slate-900\/60,
-.light #uploader_module .bg-slate-950\/40,
-.light #uploader_module .bg-slate-900\/40,
-.light #uploader_module .bg-slate-950\/20,
-.light #uploader_module .bg-slate-950\/50,
-.light #uploader_module .bg-slate-950\/60,
-.light #uploader_module .bg-slate-950\/70,
-.light #uploader_module .bg-slate-950\/80,
-.light #uploader_module .bg-slate-950\/30,
-.light #uploader_module .bg-slate-900\/50,
-.light #uploader_module .bg-\[\#0b0f19\],
-
-.light #cleaning_module .bg-slate-900\/60,
-.light #cleaning_module .bg-slate-950\/40,
-.light #cleaning_module .bg-slate-900\/40,
-.light #cleaning_module .bg-slate-950\/20,
-.light #cleaning_module .bg-slate-950\/50,
-.light #cleaning_module .bg-slate-950\/60,
-.light #cleaning_module .bg-slate-950\/70,
-.light #cleaning_module .bg-slate-950\/80,
-.light #cleaning_module .bg-slate-950\/30,
-.light #cleaning_module .bg-slate-900\/50,
-.light #cleaning_module .bg-\[\#0b0f19\],
-
-.light #eda_interactive_workspace .bg-slate-900\/60,
-.light #eda_interactive_workspace .bg-slate-950\/40,
-.light #eda_interactive_workspace .bg-slate-900\/40,
-.light #eda_interactive_workspace .bg-slate-950\/20,
-.light #eda_interactive_workspace .bg-slate-950\/50,
-.light #eda_interactive_workspace .bg-slate-950\/60,
-.light #eda_interactive_workspace .bg-slate-950\/70,
-.light #eda_interactive_workspace .bg-slate-950\/80,
-.light #eda_interactive_workspace .bg-slate-950\/30,
-.light #eda_interactive_workspace .bg-slate-900\/50,
-.light #eda_interactive_workspace .bg-\[\#0b0f19\],
-
-.light #ml_module .bg-slate-900\/60,
-.light #ml_module .bg-slate-950\/40,
-.light #ml_module .bg-slate-900\/40,
-.light #ml_module .bg-slate-950\/20,
-.light #ml_module .bg-slate-950\/50,
-.light #ml_module .bg-slate-950\/60,
-.light #ml_module .bg-slate-950\/70,
-.light #ml_module .bg-slate-950\/80,
-.light #ml_module .bg-slate-950\/30,
-.light #ml_module .bg-slate-900\/50,
-.light #ml_module .bg-\[\#0b0f19\],
-
-.light #dashboard_module_upgraded .bg-slate-900\/60,
-.light #dashboard_module_upgraded .bg-slate-950\/40,
-.light #dashboard_module_upgraded .bg-slate-900\/40,
-.light #dashboard_module_upgraded .bg-slate-950\/20,
-.light #dashboard_module_upgraded .bg-slate-950\/50,
-.light #dashboard_module_upgraded .bg-slate-950\/60,
-.light #dashboard_module_upgraded .bg-slate-950\/70,
-.light #dashboard_module_upgraded .bg-slate-950\/80,
-.light #dashboard_module_upgraded .bg-slate-950\/30,
-.light #dashboard_module_upgraded .bg-slate-900\/50,
-.light #dashboard_module_upgraded .bg-\[\#0b0f19\],
-
-.light #unified_strategy_workspace .bg-slate-900\/60,
-.light #unified_strategy_workspace .bg-slate-950\/40,
-.light #unified_strategy_workspace .bg-slate-900\/40,
-.light #unified_strategy_workspace .bg-slate-950\/20,
-.light #unified_strategy_workspace .bg-slate-950\/50,
-.light #unified_strategy_workspace .bg-slate-950\/60,
-.light #unified_strategy_workspace .bg-slate-950\/70,
-.light #unified_strategy_workspace .bg-slate-950\/80,
-.light #unified_strategy_workspace .bg-slate-950\/30,
-.light #unified_strategy_workspace .bg-slate-900\/50,
-.light #unified_strategy_workspace .bg-\[\#0b0f19\],
-
-.light #live_strategic_report_page,
-.light #python_sandbox_dock,
-.light #reports_hub_terminal {
-  background-color: rgba(255, 255, 255, 0.12) !important;
-  backdrop-filter: blur(2px) !important;
-  border-color: rgba(15, 23, 42, 0.08) !important;
-}
-

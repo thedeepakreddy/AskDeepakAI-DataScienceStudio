@@ -286,37 +286,41 @@ export default function App() {
               <div className="w-[68%] h-full bg-[#b22038]"></div>
             </div>
           </div>
-          <div className="min-w-0 flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <span className="text-white text-base sm:text-[22px] tracking-tight leading-none whitespace-nowrap shrink-0 font-display transition-colors cursor-pointer hover:opacity-80">
-                <span className="font-light text-slate-400">Ask</span>
-                <span className="font-semibold text-white tracking-wider ml-0.5">Deepak</span>
-                <span className="font-bold text-indigo-400 ml-0.5">AI</span>
+          <div className="min-w-0 flex flex-col justify-center gap-0.5">
+            {/* Main Title — Desktop */}
+            <div className="hidden sm:flex flex-col gap-0">
+              <span className="text-white text-[26px] font-extralight tracking-[-0.02em] leading-none whitespace-nowrap">
+                AI Data Science Studio
               </span>
-              <span className="hidden sm:inline-block text-[9px] uppercase font-mono px-2 py-1 rounded-[4px] bg-white/5 text-indigo-300 border border-indigo-400/20 tracking-[0.2em] shrink-0 font-semibold shadow-sm ml-2">
-                DATA SCIENTIST V3.2
+              <span className="text-slate-400 text-[11px] font-light tracking-[0.18em] uppercase mt-1 leading-none">
+                by <span className="text-indigo-400 font-medium">AskDeepakAI</span>
               </span>
             </div>
-            
-            {/* Mobile Sub-Header: Version & Mode Toggle */}
-            <div className="sm:hidden flex items-center justify-between w-full max-w-[280px] bg-slate-950/60 rounded-lg p-0.5 border border-slate-800 shrink-0">
-              <span className="text-[8px] uppercase font-mono px-2 py-1 rounded-[4px] text-indigo-300 tracking-[0.1em] font-semibold">
-                DATA SCIENTIST V3.2
+
+            {/* Main Title — Mobile */}
+            <div className="sm:hidden flex flex-col gap-0">
+              <span className="text-white text-[18px] font-extralight tracking-[-0.02em] leading-none whitespace-nowrap">
+                AI Data Science Studio
               </span>
-              <div className="flex gap-0.5">
-                <button
-                  onClick={() => setExpertMode(false)}
-                  className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-colors ${!expertMode ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
-                >
-                  Beginner
-                </button>
-                <button
-                  onClick={() => setExpertMode(true)}
-                  className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-colors ${expertMode ? 'bg-amber-600 text-white shadow-sm' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
-                >
-                  Expert
-                </button>
-              </div>
+              <span className="text-slate-400 text-[9px] font-light tracking-[0.15em] uppercase mt-1 leading-none">
+                by <span className="text-indigo-400 font-medium">AskDeepakAI</span>
+              </span>
+            </div>
+
+            {/* Mobile Mode Toggle */}
+            <div className="sm:hidden flex items-center gap-0.5 mt-2 bg-slate-950/60 rounded-lg p-0.5 border border-slate-800 self-start">
+              <button
+                onClick={() => setExpertMode(false)}
+                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-colors ${!expertMode ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
+              >
+                Beginner
+              </button>
+              <button
+                onClick={() => setExpertMode(true)}
+                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-colors ${expertMode ? 'bg-amber-600 text-white shadow-sm' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
+              >
+                Expert
+              </button>
             </div>
           </div>
         </div>
