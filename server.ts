@@ -66,7 +66,11 @@ async function generateContentWithRetry(client: GoogleGenAI, params: {
   contents: any;
   config?: any;
 }) {
-  const modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+  // Ordered newest -> most-available. gemini-2.0-flash was REMOVED here: Google
+  // shut it down on 2026-06-01, so every call to it now fails and only burns a
+  // retry cycle. gemini-3.6-flash is Google's named replacement for it, and
+  // gemini-2.5-flash stays last as the widely-provisioned safety net.
+  const modelsToTry = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.5-flash'];
   let lastError: any = null;
 
   for (const model of modelsToTry) {
@@ -132,6 +136,90 @@ const ML_SERVICE_TIMEOUT_MS = 240000;
 // out that window instead of surfacing the platform's raw gateway HTML page.
 const GATEWAY_RETRY_STATUSES = new Set([502, 503, 504]);
 const GATEWAY_RETRY_DELAYS_MS = [3000, 5000, 8000, 12000, 18000, 25000]; // ~71s total coverage
+
+// The public free-tier deployment of the Python ML service. Render spins a free
+// instance down after ~15 minutes idle, and the next request then pays a cold
+// start. The /api/ml-service/wake endpoint below lets the UI pay that cost up
+// front, in the background, before the user asks for any real training work.
+// ML_SERVICE_URL wins when it is explicitly configured (production, docker,
+// or a local uvicorn); the public URL is the fallback so the button still does
+// something useful when the app runs locally with no ML service of its own.
+const ML_SERVICE_PUBLIC_URL = 'https://askdeepakai-datascientist-mlservice.onrender.com';
+const ML_SERVICE_WAKE_URL = (process.env.ML_SERVICE_URL || ML_SERVICE_PUBLIC_URL).replace(/\/+$/, '');
+
+// A cold start is ~25-60s, so poll patiently but cap the whole thing well under
+// a browser's patience. Each individual probe gets a short timeout so a hung
+// socket doesn't eat the entire budget.
+const WAKE_PROBE_TIMEOUT_MS = 20000;
+const WAKE_TOTAL_BUDGET_MS = 120000;
+const WAKE_POLL_INTERVAL_MS = 4000;
+
+type WakeOutcome = {
+  status: 'awake';
+  url: string;
+  attempts: number;
+  elapsedMs: number;
+  coldStart: boolean;
+  service: any;
+};
+
+async function wakeMlService(): Promise<WakeOutcome> {
+  const startedAt = Date.now();
+  let attempts = 0;
+  let lastDetail = 'no response';
+
+  while (Date.now() - startedAt < WAKE_TOTAL_BUDGET_MS) {
+    attempts++;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WAKE_PROBE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${ML_SERVICE_WAKE_URL}/health`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+
+      if (response.ok) {
+        const service = await response.json().catch(() => null);
+        return {
+          status: 'awake',
+          url: ML_SERVICE_WAKE_URL,
+          attempts,
+          elapsedMs: Date.now() - startedAt,
+          // More than one probe means the first one hit a sleeping instance.
+          coldStart: attempts > 1,
+          service,
+        };
+      }
+
+      lastDetail = `HTTP ${response.status}`;
+      // Anything that is not a gateway status is the service itself answering
+      // with a real error - retrying will not change the outcome.
+      if (!GATEWAY_RETRY_STATUSES.has(response.status)) {
+        throw new Error(`ML service responded with ${lastDetail}.`);
+      }
+      console.log(`[AskDeepakAI ML wake] ${lastDetail} from ${ML_SERVICE_WAKE_URL} - still cold, probe ${attempts}...`);
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        lastDetail = `probe timed out after ${WAKE_PROBE_TIMEOUT_MS / 1000}s`;
+      } else if (/ECONNREFUSED|fetch failed|ENOTFOUND|terminated|socket hang up/i.test(String(err?.message || err))) {
+        lastDetail = String(err?.message || err);
+      } else {
+        throw err;
+      }
+      console.log(`[AskDeepakAI ML wake] ${lastDetail} - probe ${attempts}...`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, WAKE_POLL_INTERVAL_MS));
+  }
+
+  throw new Error(
+    `The ML service at ${ML_SERVICE_WAKE_URL} did not come up within ${WAKE_TOTAL_BUDGET_MS / 1000}s (last: ${lastDetail}). ` +
+    `Free-tier cold starts are usually under a minute - try once more, or check the host's dashboard.`
+  );
+}
+
 
 async function callMlService(path: string, options: { method?: string; body?: any } = {}) {
   for (let attempt = 0; ; attempt++) {
@@ -200,6 +288,40 @@ async function callMlService(path: string, options: { method?: string; body?: an
     }
   }
 }
+
+// 0. ML SERVICE WAKE-UP (free-tier cold start primer)
+// Deliberately server-side: the browser cannot probe the ML host directly
+// without CORS on it, and proxying here also keeps the service URL out of the
+// client bundle. Returns only status metadata - nothing is rendered to the user.
+app.post('/api/ml-service/wake', async (_req, res) => {
+  try {
+    const outcome = await wakeMlService();
+    console.log(`[AskDeepakAI ML wake] Service awake after ${outcome.attempts} probe(s) in ${outcome.elapsedMs}ms.`);
+    res.json(outcome);
+  } catch (err: any) {
+    console.error('[AskDeepakAI ML wake] Failed:', err?.message || err);
+    res.status(503).json({
+      status: 'unreachable',
+      url: ML_SERVICE_WAKE_URL,
+      error: err?.message || 'Failed to wake the ML service.',
+    });
+  }
+});
+
+// Lightweight, non-blocking status probe. Unlike /wake this never retries, so
+// the UI can poll it cheaply to show whether the service is still warm.
+app.get('/api/ml-service/status', async (_req, res) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${ML_SERVICE_WAKE_URL}/health`, { method: 'GET', signal: controller.signal });
+    res.json({ status: response.ok ? 'awake' : 'asleep', url: ML_SERVICE_WAKE_URL });
+  } catch {
+    res.json({ status: 'asleep', url: ML_SERVICE_WAKE_URL });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+});
 
 // 1. DATASET ANALYSIS & AUTOMATED MODEL RECOMMENDATION
 app.post('/api/analyze-dataset', async (req, res) => {
