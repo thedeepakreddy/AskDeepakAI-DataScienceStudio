@@ -40,6 +40,7 @@ import AssistiveTouchBot from './components/AssistiveTouchBot';
 import NeuralBackground from './components/NeuralBackground';
 import StageNavigation from './components/StageNavigation';
 import StageHeader from './components/StageHeader';
+import MLServiceWakeButton from './components/MLServiceWakeButton';
 import PipelineProgressBar from './components/PipelineProgressBar';
 import { usePipelineContext, PipelineStage } from './contexts/PipelineContext';
 
@@ -348,6 +349,8 @@ export default function App() {
               Expert
             </button>
           </div>
+
+          <MLServiceWakeButton />
 
           <button
             onClick={() => setIsAboutModalOpen(true)}
