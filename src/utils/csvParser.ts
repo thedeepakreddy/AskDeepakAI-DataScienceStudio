@@ -53,16 +53,21 @@ export function parseCSV(text: string, filename: string): Dataset {
   const parsedLines = lines.map(l => JSON.parse(l) as string[]);
   const headers = parsedLines[0].map(h => h.replace(/^"|"$/g, '').trim() || 'unnamed_column');
   
-  // Deduplicate headers
-  const headerCount: Record<string, number> = {};
+  // Deduplicate headers. Keep bumping the suffix until we land on a name
+  // that isn't already taken by an original header OR a previously
+  // deduplicated one - a single "_N" bump can otherwise collide with a
+  // real later header of that exact form (e.g. "Name", "Name_1", "Name"
+  // naively dedupes to "Name", "Name_1", "Name_1", silently merging two
+  // columns' data in the row-building loop below).
+  const usedHeaderNames = new Set<string>();
   const cleanHeaders = headers.map(header => {
     let name = header;
-    if (headerCount[name] !== undefined) {
-      headerCount[name]++;
-      name = `${name}_${headerCount[name]}`;
-    } else {
-      headerCount[name] = 0;
+    let suffix = 1;
+    while (usedHeaderNames.has(name)) {
+      name = `${header}_${suffix}`;
+      suffix++;
     }
+    usedHeaderNames.add(name);
     return name;
   });
 

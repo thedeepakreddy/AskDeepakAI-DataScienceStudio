@@ -230,13 +230,21 @@ export default function DataCleaning({ dataset, onUpdateDataset, onResetOriginal
     });
 
     const updatedRows = [...dataset.rows, newRow];
-    
+
     // Increment distinct / count stats gently
     const updatedCols = dataset.columns.map(col => ({
       ...col,
       missingCount: col.type !== 'numeric' && col.type !== 'boolean' ? col.missingCount + 1 : col.missingCount
     }));
 
+    const newOp: CleaningOperation = {
+      id: crypto.randomUUID(),
+      type: 'add_row',
+      column: '',
+      params: { rowIndex: updatedRows.length - 1 }
+    };
+
+    setOperations([...operations, newOp]);
     onUpdateDataset({
       ...dataset,
       columns: updatedCols,
@@ -250,7 +258,15 @@ export default function DataCleaning({ dataset, onUpdateDataset, onResetOriginal
   const handleDeleteRow = (index: number) => {
     if (index < 0 || index >= dataset.rows.length) return;
     const updatedRows = dataset.rows.filter((_, idx) => idx !== index);
-    
+
+    const newOp: CleaningOperation = {
+      id: crypto.randomUUID(),
+      type: 'delete_row',
+      column: '',
+      params: { index }
+    };
+
+    setOperations([...operations, newOp]);
     onUpdateDataset({
       ...dataset,
       rows: updatedRows,

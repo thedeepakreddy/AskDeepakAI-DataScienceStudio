@@ -681,7 +681,12 @@ app.post('/api/chat-bot', async (req, res) => {
 
       // 2. UPDATE query parsing (e.g., UPDATE dataset SET churn = 1 WHERE tenure < 5)
       if (msgLower.includes('update') && msgLower.includes('set')) {
-        const matchSet = msgLower.match(/set\s+(\w+)\s*=\s*([^where]+)/i);
+        // Capture everything up to a real " where" word boundary (or end of
+        // string) - a bracketed [^where] is a character class excluding the
+        // letters w/h/e/r individually, not "until the literal word WHERE",
+        // and would truncate any captured value containing one of those
+        // letters (e.g. "SET Status = Active" was silently cut to "Activ").
+        const matchSet = msgLower.match(/set\s+(\w+)\s*=\s*(.+?)(?:\s+where\b|$)/i);
         if (matchSet) {
           const colToUpdate = colNames.find(c => c.toLowerCase() === matchSet[1].toLowerCase()) || matchSet[1];
           let expr = matchSet[2].trim();
@@ -1790,31 +1795,34 @@ let savedDbConfig: any = null;
 
 app.post('/api/db-connections', async (req, res) => {
   const { provider, connectionString, schedule } = req.body;
-  
+
   if (!provider || !connectionString) {
     return res.status(400).json({ error: "Provider and Connection string required." });
   }
 
   if (provider === 'PostgreSQL') {
-    // Always use SSL for non-localhost connections
+    // Always use SSL for non-localhost connections, with real certificate
+    // verification (the pg/Node default) - accepting any certificate
+    // (rejectUnauthorized: false) defeats SSL's MITM protection entirely
+    // while still claiming to be secure.
     const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
-                      
-    const client = new Client({ 
+
+    const client = new Client({
       connectionString,
       connectionTimeoutMillis: 10000,
-      ...(!isLocal ? { ssl: { rejectUnauthorized: false } } : {})
+      ...(!isLocal ? { ssl: true } : {})
     });
-    
+
     try {
       await client.connect();
       // fetch all tables in public schema
       const tablesRes = await client.query(`
-        SELECT table_name 
-        FROM information_schema.tables 
-        WHERE table_schema = 'public' 
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
         AND table_type = 'BASE TABLE'
       `);
-      
+
       if (tablesRes.rows.length === 0) {
         await client.end();
         return res.status(400).json({ error: "No tables found in the public schema of the provided database." });
@@ -1823,22 +1831,21 @@ app.post('/api/db-connections', async (req, res) => {
       // query the first table
       const firstTable = tablesRes.rows[0].table_name;
       const dataRes = await client.query(`SELECT * FROM "${firstTable}" LIMIT 2000`);
-      
+
       await client.end();
-      
-      savedDbConfig = { provider, connectionString, schedule };
-      return res.json({ 
-        status: "success", 
+
+      return res.json({
+        status: "success",
         message: `Connected to PostgreSQL and sync scheduled via ${schedule}. Loaded ${dataRes.rows.length} rows from table "${firstTable}".`,
-        data: dataRes.rows 
+        data: dataRes.rows
       });
-      
+
     } catch (err: any) {
       // try to end client if it's connected
       try { await client.end(); } catch (e) {}
 
       let errorMsg = err.message || String(err);
-      
+
       // Friendly messages for common connection errors
       if (errorMsg.includes('EAI_AGAIN') || errorMsg.includes('ENOTFOUND')) {
         errorMsg = `Could not resolve hostname '${errorMsg.split(' ').pop()}'. Please check if your connection string has the correct database host URL, and that it is publicly accessible.`;
@@ -1850,14 +1857,15 @@ app.post('/api/db-connections', async (req, res) => {
         errorMsg = 'Database rejected connection (no pg_hba.conf entry). You may need to allow public access or add this IP to the allowlist.';
       } else if (errorMsg.includes('password authentication failed')) {
         errorMsg = 'Password authentication failed. Please verify your database username and password.';
+      } else if (errorMsg.includes('self signed certificate') || errorMsg.includes('self-signed certificate') || errorMsg.includes('unable to verify the first certificate') || errorMsg.includes('unable to get local issuer certificate')) {
+        errorMsg = 'Could not verify the database\'s SSL certificate (it may be self-signed or use an untrusted certificate authority). For security, connections with an unverifiable certificate are refused rather than silently accepted.';
       }
-      
+
       return res.status(500).json({ error: "Failed to connect to PostgreSQL: " + errorMsg });
     }
   }
 
   // Handle other providers (Snowflake mock for now)
-  savedDbConfig = { provider, connectionString, schedule };
   return res.json({ status: "success", message: `Connected to ${provider} and scheduled sync via ${schedule}`, data: null });
 });
 
